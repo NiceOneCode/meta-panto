@@ -1,0 +1,4601 @@
+From a0ad086f9711f858a6e651aeacbcdc80cc8b3f69 Mon Sep 17 00:00:00 2001
+From: WANGA <andrea_gai@virgilio.it>
+Date: Wed, 23 May 2018 15:45:45 +0200
+Subject: [PATCH] add-panto-spi-driver
+
+
+diff --git a/drivers/Kconfig b/drivers/Kconfig
+index 2b4f5b4..6dd58a4 100644
+--- a/drivers/Kconfig
++++ b/drivers/Kconfig
+@@ -184,4 +184,6 @@ source "drivers/thunderbolt/Kconfig"
+ 
+ source "drivers/android/Kconfig"
+ 
++source "drivers/dmg/Kconfig"
++
+ endmenu
+diff --git a/drivers/Makefile b/drivers/Makefile
+index ebfe80c..5dfc169 100644
+--- a/drivers/Makefile
++++ b/drivers/Makefile
+@@ -166,3 +166,4 @@ obj-$(CONFIG_RAS)		+= ras/
+ obj-$(CONFIG_THUNDERBOLT)	+= thunderbolt/
+ obj-$(CONFIG_CORESIGHT)		+= hwtracing/coresight/
+ obj-$(CONFIG_ANDROID)		+= android/
++obj-$(CONFIG_PANTODRIVER)		+= dmg/
+diff --git a/drivers/dmg/ACQManager/AD7699.c b/drivers/dmg/ACQManager/AD7699.c
+new file mode 100644
+index 0000000..5065210
+--- /dev/null
++++ b/drivers/dmg/ACQManager/AD7699.c
+@@ -0,0 +1,285 @@
++/***************************************************************************************
++ *
++ * File:        AD7699.c
++ * Progetto:    Pantografo Zefiro ETR1000
++ * Ambiente:    IAR System
++ * Data:        ??/??/2012
++ * Autore:      D.Nesi
++ *              S.Mori
++ * Versione:    01.00
++ *
++ * Descrizione: Modulo per la gestione del componente AD 7699 (ADC 16 bit SPI)
++ *
++ *
++ */
++
++/* Include di sistema   */
++#include <linux/io.h>
++#include <linux/string.h>
++#include <linux/unistd.h>
++#include <linux/time.h>   // for using jiffies
++#include <linux/timer.h>
++#include <linux/delay.h>
++#include <linux/kernel.h>
++#include "TYPEDEFS.H"
++
++#include "spi_interface.h"
++#include "AD7699.h"
++
++
++
++#define LEN_BUFFER     20
++
++
++
++/* Variabili Statiche */
++static Int8U waubCtrlReg[4] = {0xFF,0xFF,0xFF,0xFF};
++static Int8U waubRxBuff_Chn01[LEN_BUFFER];
++static Int8U waubRxBuff_Chn02[LEN_BUFFER];
++static Int8U waubRxBuff_Chn03[LEN_BUFFER];
++static Int8U waubRxBuff_Chn04[LEN_BUFFER];
++static Int8U pubCfgReadBack[LEN_BUFFER];
++static Int32U wulWait = 0;
++//static Int8U waubDummy4[4] = {0, 0, 0, 0};
++
++/* Funzioni Statiche */
++static void AD7699_CsInit( void );
++static void AD7699_SetCS (int bVal);
++
++static int gpioinit_ADC = 0;
++static void __iomem *gpio_base_ADC;
++
++
++
++/*******************************************************************************
++ *
++ *  AD7699_Init
++ *
++ */
++int AD7699_Init(void)
++{
++        int boRet = 0;
++        Int8U ubIdx = 0;
++
++        boRet=Spi_Init();
++        if(boRet < 0)
++        {
++                printk(KERN_INFO "@@@ function : %s line : %d Spi_Init FAILED!!! \n",__FUNCTION__, __LINE__);
++                return(-1);
++        }
++
++        /* Composizione control register (MSB FIRST!!!!)*/
++        /* Read back contents of configuration,  Scan IN0 to IN[7:0] (set in CFG[9:7]),
++           External reference, temperature disabled,  Full BW, In0 -> In3, Unipolar, IN0 to IN7
++           referenced to GND, Overwrite contents of register*/
++        waubCtrlReg[1] = 0xD8; /* LSB, aggiungere 2 bit LSb: XXXXXX00*/
++        waubCtrlReg[0] = 0xF3; /* MSB */
++
++        /* Iniz. CS come SPI */
++        AD7699_CsInit();
++
++        /* Impulso di avvio conversione al power on */
++        AD7699_SetCS(0);
++        udelay(1);
++        AD7699_SetCS(1);
++
++
++
++        /* Programmazione ADC (canale SPI)*/
++        AD7699_SetCS(0);
++        boRet = Spi_TxBuff(&waubCtrlReg[0], 4);
++        waubCtrlReg[0] = 0x77; /* .... Keep current configuration settings .... */
++
++        udelay(wulWait);
++        AD7699_SetCS(1);
++
++        /* Rilettura CFG di ADC (canale SPI)*/
++        AD7699_SetCS(0);
++        boRet = Spi_RxBuff(&waubCtrlReg[0], 4, pubCfgReadBack);
++        udelay(wulWait);
++        AD7699_SetCS(1);
++
++        /* Reset buffers */
++        for (ubIdx = 0; ubIdx < LEN_BUFFER; ubIdx++)
++        {
++                waubRxBuff_Chn01[ubIdx] = 0;
++                waubRxBuff_Chn02[ubIdx] = 0;
++                waubRxBuff_Chn03[ubIdx] = 0;
++                waubRxBuff_Chn04[ubIdx] = 0;
++        }
++
++        return boRet;
++}
++
++
++/*******************************************************************************
++ *
++ *  AD7699_Put
++ *
++ */
++int AD7699_Put( Int8U *aubData)
++{
++        int boRet = 0;
++
++        /* Aggiornamento buffer di appoggio */
++        waubCtrlReg[1] = aubData[1];
++        waubCtrlReg[0] = aubData[0];
++
++        /* Programmo ADC (canale SPI)*/
++        AD7699_SetCS(0);
++        boRet = Spi_TxBuff(&waubCtrlReg[0], 4);
++        AD7699_SetCS(1);
++
++        return(boRet);
++}
++
++/*******************************************************************************
++ *
++ *  AD7699_Get
++ *
++ */
++int AD7699_Get(TBitWord *aubValue)
++{
++        WORD val1;
++        aubValue[0].mBYTE.L = waubRxBuff_Chn01[0]; /* MSB acquisizione */
++        aubValue[0].mBYTE.H = waubRxBuff_Chn01[1]; /* LSB acquisizione */
++        aubValue[1].mBYTE.L = waubRxBuff_Chn02[0]; /* MSB acquisizione */
++        aubValue[1].mBYTE.H = waubRxBuff_Chn02[1]; /* LSB acquisizione */
++
++        val1= (WORD) ((long)(aubValue[0].mWORD * 5000)>>16);
++        val1 = 11000-(2*val1);
++
++
++        if (mbVerbose) printk (KERN_INFO "################# Canale %d ==> Dato = %d \t Valore = %d \n",1, aubValue[0].mWORD, val1);
++        //aubValue[0].mWORD=val1;
++        val1= (WORD) ((long)(aubValue[1].mWORD * 5000)>>16);
++        val1 = 11000-(2*val1);
++
++        if (mbVerbose) printk (KERN_INFO "################# Canale %d ==> Dato = %d \t Valore = %d \n",2, aubValue[1].mWORD, val1);
++        // aubValue[1].mWORD=val1;
++
++        // aubValue[2]->mBYTE.H = waubRxBuff_Chn03[0]; /* MSB acquisizione */
++        // aubValue[2]->mBYTE.L = waubRxBuff_Chn03[1]; /* LSB acquisizione */
++        // aubValue[3]->mBYTE.H = waubRxBuff_Chn04[0]; /* MSB acquisizione */
++        // aubValue[3]->mBYTE.L = waubRxBuff_Chn04[1]; /* LSB acquisizione */
++        return(1);
++}
++
++
++/*******************************************************************************
++ *
++ *  AD7699_Acquire
++ *
++ */
++int AD7699_Acquire(void)
++{
++        int boRet = 0;
++        int nChannel=0;
++        Int8U aubTmp[4] = {0, 0, 0, 0};
++        Int8U ubChannel = 0;
++
++        for (nChannel=0; nChannel<2; nChannel++)
++        {
++                /* Lettura */
++                AD7699_SetCS(0);
++                boRet = Spi_RxBuff( &waubCtrlReg[0], 4, &aubTmp[0]);
++                udelay(wulWait);
++                AD7699_SetCS(1);
++                udelay(100);
++
++                /* Bufferizzazione per canale */
++                ubChannel = (aubTmp[2] >> 1) & 0x07;
++
++                switch(ubChannel)
++                {
++                case 0:
++                        waubRxBuff_Chn01[0] = aubTmp[0]; /* MSB acquisizione */
++                        waubRxBuff_Chn01[1] = aubTmp[1]; /* LSB acquisizione */
++                        waubRxBuff_Chn01[2] = aubTmp[2]; /* MSB CFG, con sequenziatore indica anche il canale acquisito */
++                        waubRxBuff_Chn01[3] = aubTmp[3]; /* LSB CFG */
++                        break;
++
++                case 1:
++                        waubRxBuff_Chn02[0] = aubTmp[0]; /* MSB acquisizione */
++                        waubRxBuff_Chn02[1] = aubTmp[1]; /* LSB acquisizione */
++                        waubRxBuff_Chn02[2] = aubTmp[2]; /* MSB CFG, con sequenziatore indica anche il canale acquisito */
++                        waubRxBuff_Chn02[3] = aubTmp[3]; /* LSB CFG */
++                        break;
++
++                // case 2:
++                //  waubRxBuff_Chn03[0] = aubTmp[0]; /* MSB acquisizione */
++                //  waubRxBuff_Chn03[1] = aubTmp[1]; /* LSB acquisizione */
++                //  waubRxBuff_Chn03[2] = aubTmp[2]; /* MSB CFG, con sequenziatore indica anche il canale acquisito */
++                //  waubRxBuff_Chn03[3] = aubTmp[3]; /* LSB CFG */
++                //  break;
++                //
++                // case 3:
++                //  waubRxBuff_Chn04[0] = aubTmp[0]; /* MSB acquisizione */
++                //  waubRxBuff_Chn04[1] = aubTmp[1]; /* LSB acquisizione */
++                //  waubRxBuff_Chn04[2] = aubTmp[2]; /* MSB CFG, con sequenziatore indica anche il canale acquisito */
++                //  waubRxBuff_Chn04[3] = aubTmp[3]; /* LSB CFG */
++                //  break;
++
++                default:
++                        break;
++                }
++        }
++        return(boRet);
++}
++
++/*******************************************************************************
++ *
++ *  AD7699_CsInit
++ *
++ */
++
++
++#define GPIO5_DIRR 0x020AC004
++#define GPIO5_DATA 0x020AC000
++#define GPIO5_PIN17 (1 << 17 )
++
++static void AD7699_CsInit( void )
++{
++        unsigned long ul_gio_base_app;
++        if(gpioinit_ADC==0)
++        {
++                // set as OUTPUT
++                gpio_base_ADC = ioremap(GPIO5_DIRR, SZ_4K);
++                gpioinit_ADC++;
++                ul_gio_base_app= __raw_readl(gpio_base_ADC);
++
++                __raw_writel((ul_gio_base_app ^ GPIO5_PIN17), gpio_base_ADC);
++
++                // set Value
++                gpio_base_ADC = ioremap(GPIO5_DATA, SZ_4K);
++                gpioinit_ADC++;
++                ul_gio_base_app= __raw_readl(gpio_base_ADC);
++
++                __raw_writel((ul_gio_base_app | GPIO5_PIN17), gpio_base_ADC);
++
++        }
++
++}
++
++
++
++/*******************************************************************************
++ *
++ *  AD7699_SetCS
++ *
++ */
++static void AD7699_SetCS(int bVal)
++{
++        unsigned long ul_gio_base_app;
++        AD7699_CsInit();
++        ul_gio_base_app= __raw_readl(gpio_base_ADC);
++        if(bVal)
++        {
++                __raw_writel((ul_gio_base_app | GPIO5_PIN17), gpio_base_ADC);
++        }
++        else
++        {
++                __raw_writel((ul_gio_base_app & (~GPIO5_PIN17)), gpio_base_ADC);
++        }
++
++}
+diff --git a/drivers/dmg/ACQManager/AD7699.h b/drivers/dmg/ACQManager/AD7699.h
+new file mode 100644
+index 0000000..df5e621
+--- /dev/null
++++ b/drivers/dmg/ACQManager/AD7699.h
+@@ -0,0 +1,32 @@
++/***************************************************************************************
++ *
++ * File:        AD7699.h
++ * Progetto:    Pantografo Zefiro ETR1000
++ * Ambiente:    IAR System
++ * Data:        ??/??/2012
++ * Autore:      D.Nesi
++ *              S.Mori
++ * Versione:    01.00
++ *
++ * Descrizione: Modulo per la gestione del componente AD 7699 (ADC 16 bit SPI)
++ *
++ *
++ */
++#ifndef _AD7699_H
++#define _AD7699_H 1
++
++#include "TYPEDEFS.H"
++
++#define ADC_CHN_1   10
++#define ADC_CHN_2   20
++#define ADC_CHN_3   30
++#define ADC_CHN_4   40
++
++
++
++int AD7699_Init    ( void);
++int AD7699_Put     ( Int8U *aubValue );
++int AD7699_Get     ( TBitWord *aubValue );
++int AD7699_Acquire (void);
++
++#endif // _AD7699_H
+diff --git a/drivers/dmg/ACQManager/AcqManager.c b/drivers/dmg/ACQManager/AcqManager.c
+new file mode 100644
+index 0000000..8a42953
+--- /dev/null
++++ b/drivers/dmg/ACQManager/AcqManager.c
+@@ -0,0 +1,960 @@
++/*********************************************************************************/
++/*********************************************************************************/
++/*                            INCLUDE                                            */
++/*********************************************************************************/
++
++#include <linux/module.h>
++#include <linux/kobject.h>
++#include <linux/sysfs.h>
++#include <linux/init.h>
++#include <linux/fs.h>
++#include <linux/string.h>
++
++#include <linux/types.h>
++#include <linux/kernel.h>
++#include <linux/clk.h>
++#include <linux/io.h>
++#include <linux/uaccess.h>
++
++/***********************************************************/
++#include <linux/kthread.h>  // for threads
++#include <linux/time.h>   // for using jiffies
++#include <linux/timer.h>
++#include <linux/delay.h>
++/***********************************************************/
++#include <linux/mutex.h>
++#include <linux/device.h>
++#include <linux/unistd.h>
++
++
++#include <linux/gpio.h>
++#include <linux/io.h>
++#include <linux/of.h>
++#include <linux/of_address.h>
++#include <linux/of_gpio.h>
++
++
++#include "TYPEDEFS.H"
++#include "spi_interface.h"
++#include "Acq_Storage.h"
++#include "AD7699.h"
++
++
++
++/*###############################################################################*/
++/*###############################################################################*/
++/*                            DECLARATION                                        */
++/*###############################################################################*/
++#define _POSIX_C_SOURCE 199309L
++
++#define INTERRUPT_MODE 1
++
++#if INTERRUPT_MODE
++  #define RUNNER_MODE 0
++#else
++  #define RUNNER_MODE 1
++#endif
++/*********************************************************************************/
++/*                            DEFINE                                             */
++/*********************************************************************************/
++
++#define UNSEC_IN_SEC  1L
++#define UNSEC_IN_MSEC 1000L
++#define UNSEC_IN_USEC 1000000L
++#define UNSEC_IN_NSEC 1000000000L
++#define UNMIN_IN_NSEC 60000000000L
++
++#define UNMSEC_IN_NSEC 1000000L
++#define UNUSEC_IN_NSEC 1000L
++
++#define UNMIN_IN_SEC  60L
++#define UNHOUR_IN_SEC 3600L
++
++#define CENTOMSEC_IN_MSEC 100L
++
++#define MAX_FREQUENCY_AXSIS_HZ 1000L
++#define DEFAULT_FREQUENCY_AXSIS_HZ 500L
++#define MIN_FREQUENCY_AXSIS_HZ 1L
++
++
++#define MIN_SAMPLE_GET 10
++#define MAX_SAMPLE_GET 400
++
++#define NO_PIN_TOGGLE 1
++
++
++
++
++//GPIO direction register
++#define GPIO4_DIRR 0X020A8004
++//GPIO data register
++#define GPIO4_DATA 0X020A8000
++//0x00004000
++
++// #define GPIO4_PIN15_TP2 (1<<15)
++// #define GPIO4_PIN14_TP3 (1<<14)
++// #define GPIO4_PIN11_TP4 (1<<11)
++#define GPIO4_PIN10_TP5 (1<<10)
++
++/*********************************************************************************/
++/*                            PRIVATE CONST                                      */
++/*********************************************************************************/
++/*********************************************************************************/
++/*                            PRIVATE VARIABLE                                   */
++/*********************************************************************************/
++
++/**************************************************************/
++static struct task_struct *thread1;
++static struct mutex my_mutex;
++static DEFINE_MUTEX(my_lock);
++static struct kobject *dmg_kobject;
++
++static unsigned char muc_processActive = 0;
++static DEFINE_MUTEX(processOnlock);
++
++static bool mbVerbose = false;
++
++static unsigned long mul_AXIS_Freq = DEFAULT_FREQUENCY_AXSIS_HZ;
++
++static unsigned long mul_Sample_Get= MAX_SAMPLE_GET / 2;
++
++static unsigned long ul_wait_in_nano =  ((unsigned long ) (UNSEC_IN_NSEC) /(unsigned long ) (DEFAULT_FREQUENCY_AXSIS_HZ ));
++
++#if INTERRUPT_MODE
++static unsigned long mReset_ACQ_Storage = 0L;
++
++static unsigned long mReset_ACQ = ((500 * UNMSEC_IN_NSEC ) / ((unsigned long ) (UNSEC_IN_NSEC) /(unsigned long ) (DEFAULT_FREQUENCY_AXSIS_HZ )));
++#endif
++
++#if RUNNER_MODE
++static unsigned long t1, t2;
++static unsigned long ul_semi_period_in_nano  = (UNSEC_IN_NSEC / DEFAULT_FREQUENCY_AXSIS_HZ);
++#endif
++static unsigned long ul_semi_period_in_milli = (UNSEC_IN_MSEC / DEFAULT_FREQUENCY_AXSIS_HZ);
++static unsigned long ul_semi_period_in_micro = (UNSEC_IN_USEC / DEFAULT_FREQUENCY_AXSIS_HZ);
++
++
++#if INTERRUPT_MODE
++static struct hrtimer hr_timer;
++//static int value = 0;
++static ktime_t ktime;
++
++static int mflag=0;
++
++static DECLARE_WAIT_QUEUE_HEAD(tick_event);
++#endif
++
++
++//static Int8U AD7966ADD[4] = {ADC_CHN_1,ADC_CHN_2,ADC_CHN_3,ADC_CHN_4};
++
++/**************************************************************/
++
++/*********************************************************************************/
++/*                            PRIVATE FUNCTION                                   */
++/*********************************************************************************/
++static unsigned char isProcessON (void);
++static unsigned char SetProcessONOFF (unsigned char invalue);
++
++
++
++static int thread_fn( void * empty);
++static int thread_init (void);
++static void thread_cleanup(void);
++
++static int retrive_data( WORD * data);
++static int samplingAction (void);
++
++
++static ssize_t show_axis(int iiId, char *buf);
++static ssize_t ApplyConfiguration(void);
++
++
++static ssize_t show_Ch01(struct kobject *kobj, struct kobj_attribute *attr, char *buf);
++static ssize_t show_Ch02(struct kobject *kobj, struct kobj_attribute *attr, char *buf);
++// static ssize_t show_Ch03(struct kobject *kobj, struct kobj_attribute *attr, char *buf);
++// static ssize_t show_Ch04(struct kobject *kobj, struct kobj_attribute *attr, char *buf);
++static ssize_t getConfiguration(struct kobject *kobj, struct kobj_attribute *attr, char *buf);
++static ssize_t setConfiguration(struct kobject *kobj, struct kobj_attribute *attr, const char *buf, size_t count);
++
++
++static ssize_t setVerbose(struct kobject *kobj, struct kobj_attribute *attr, const char *buf, size_t count);
++static ssize_t turnOnOFF(struct kobject *kobj, struct kobj_attribute *attr, const char *buf, size_t count);
++static ssize_t getState(struct kobject *kobj, struct kobj_attribute *attr, char *buf);
++static ssize_t getHelpConfig(struct kobject *kobj, struct kobj_attribute *attr, char *buf);
++
++
++static int __init mymodule_init (void);
++static void __exit mymodule_exit (void);
++
++static ssize_t show_available_Ch01(struct kobject *kobj, struct kobj_attribute *attr, char *buf);
++static ssize_t show_available_Ch02(struct kobject *kobj, struct kobj_attribute *attr, char *buf);
++// static ssize_t show_available_Ch03(struct kobject *kobj, struct kobj_attribute *attr, char *buf);
++// static ssize_t show_available_Ch04(struct kobject *kobj, struct kobj_attribute *attr, char *buf);
++
++static ssize_t show_available(int iiId, char *buf);
++
++static ssize_t setLoadSample(struct kobject *kobj, struct kobj_attribute *attr, const char *buf, size_t count);
++
++#if RUNNER_MODE
++static void best_resolution(void);
++#endif
++#if INTERRUPT_MODE
++enum hrtimer_restart ACQM_hrtimer_callback( struct hrtimer *timer );
++#endif
++/*********************************************************************************/
++/*                            PUBLIC FUNCTION                                    */
++/*********************************************************************************/
++#include "spi_interface.c"
++#include "Acq_Storage.c"
++#include "AD7699.c"
++
++/*********************************************************************************/
++/*                            PUBLIC VARIABLE                                    */
++/*********************************************************************************/
++/*###############################################################################*/
++
++static int gpioinit_ACQM = 0;
++static void __iomem *gpio_base_ACQM;
++static void debug_gpio_init_ACQM (void)
++{
++        unsigned long ul_gio_base_app;
++        if(gpioinit_ACQM==0)
++        {
++                // set as OUTPUT
++                gpio_base_ACQM = ioremap(GPIO4_DIRR, SZ_4K);
++                gpioinit_ACQM++;
++                ul_gio_base_app= __raw_readl(gpio_base_ACQM);
++                //  printk(KERN_INFO "%s\n",__FUNCTION__);
++
++                // __raw_writel((ul_gio_base_app ^ GPIO4_PIN15_TP2), gpio_base_ACQM);
++                // __raw_writel((ul_gio_base_app ^ GPIO4_PIN14_TP3), gpio_base_ACQM);
++                // __raw_writel((ul_gio_base_app ^ GPIO4_PIN11_TP4), gpio_base_ACQM);
++                __raw_writel((ul_gio_base_app ^ GPIO4_PIN10_TP5), gpio_base_ACQM);
++
++                // set Value
++                gpio_base_ACQM = ioremap(GPIO4_DATA, SZ_4K);
++                gpioinit_ACQM++;
++                ul_gio_base_app= __raw_readl(gpio_base_ACQM);
++                // printk(KERN_INFO "%s\n",__FUNCTION__);
++                //__raw_writel((ul_gio_base_app ^ GPIO4_PIN15_TP2), gpio_base_ACQM);
++                // __raw_writel((ul_gio_base_app ^ GPIO4_PIN14_TP3), gpio_base_ACQM);
++                // __raw_writel((ul_gio_base_app ^ GPIO4_PIN11_TP4), gpio_base_ACQM);
++                __raw_writel((ul_gio_base_app ^ GPIO4_PIN10_TP5), gpio_base_ACQM);
++        }
++}
++
++static void debug_gpio_ACQM(unsigned long witchTP)
++{
++        unsigned long ul_gio_base_app;
++        debug_gpio_init_ACQM();
++        // printk(KERN_INFO "%s\n",__FUNCTION__);
++        ul_gio_base_app= __raw_readl(gpio_base_ACQM);
++        __raw_writel((ul_gio_base_app ^ witchTP), gpio_base_ACQM);
++}
++
++static void debug_gpio_ACQM_UP(unsigned long witchTP)
++{
++        unsigned long ul_gio_base_app;
++        debug_gpio_init_ACQM();
++        // printk(KERN_INFO "%s\n",__FUNCTION__);
++        ul_gio_base_app= __raw_readl(gpio_base_ACQM);
++        __raw_writel((ul_gio_base_app | witchTP), gpio_base_ACQM);
++}
++static void debug_gpio_ACQM_DOWN(unsigned long witchTP)
++{
++        unsigned long ul_gio_base_app;
++        debug_gpio_init_ACQM();
++        // printk(KERN_INFO "%s\n",__FUNCTION__);
++        ul_gio_base_app= __raw_readl(gpio_base_ACQM);
++        __raw_writel((ul_gio_base_app & (~witchTP)), gpio_base_ACQM);
++}
++
++
++static unsigned char isProcessON (void)
++{
++        unsigned char value;
++        mutex_lock(&processOnlock);
++        value = muc_processActive;
++        mutex_unlock(&processOnlock);
++
++        if (value)
++        {
++                return(1);
++        }
++        return(0);
++}
++
++
++static unsigned char  SetProcessONOFF (unsigned char invalue)
++{
++        unsigned char value=0;
++        if (invalue)
++        {
++                value=1;
++        }
++
++        mutex_lock(&processOnlock);
++        muc_processActive = value;
++        mutex_unlock(&processOnlock);
++
++        return (value);
++
++}
++
++#if INTERRUPT_MODE
++enum hrtimer_restart ACQM_hrtimer_callback( struct hrtimer *timer )
++{
++        /* Riabilita il timer */
++        hrtimer_start( &hr_timer, ktime, HRTIMER_MODE_REL );
++
++        /* Arma il thread */
++        mflag=1;
++        wake_up_interruptible(&tick_event);
++
++        return HRTIMER_NORESTART;
++}
++
++
++/* THREAD */
++static int thread_fn( void * empty)
++{
++        int res=0;
++        res=AD7699_Init();
++        if(res < 0)
++        {
++                printk(KERN_INFO "@@@ DMG ACQ Manager function : %s line : %d AD7699_Init FAILED!!! \n",__FUNCTION__, __LINE__);
++                return (-1);
++        }
++
++        do
++        {
++                /* Aspetta a tempo indeterminato l'evento del timer */
++                wait_event_interruptible(tick_event,(mflag==1));
++                mflag=0;
++                /* Controlla se deve fermarsi */
++                if(kthread_should_stop())
++                {
++                        printk("receive_thread exited\n");
++                        return 0;
++                }
++
++                // debug_gpio_ACQM(GPIO4_PIN10_TP5);
++                if( isProcessON())
++                {
++                        debug_gpio_ACQM_UP(GPIO4_PIN10_TP5);
++                        samplingAction();
++                        debug_gpio_ACQM_DOWN(GPIO4_PIN10_TP5);
++                        //   debug_gpio_ACQM(GPIO4_PIN10_TP5);
++                }
++                else
++                {
++                        debug_gpio_ACQM(GPIO4_PIN10_TP5);
++                        if( mReset_ACQ_Storage < 1 )
++                        {
++                                mReset_ACQ_Storage = mReset_ACQ;
++                                Acq_Storage_ResetAll();
++                                if (mbVerbose) printk(KERN_INFO "DMG ACQ Manager: ACQ Pause\n");
++                        }
++                        else
++                        {
++                                mReset_ACQ_Storage--;
++                        }
++                }
++                /* Esce dalla sezione critica */
++                // up_write(&rwsem_lock);
++        }
++        while(!kthread_should_stop());
++
++        return 0;
++}
++#endif
++#if RUNNER_MODE
++static int thread_fn( void * empty)
++{
++        int res=0;
++        struct timespec tm;
++        int value=0;
++
++
++        res=AD7699_Init();
++        if(res < 0)
++        {
++                printk(KERN_INFO "@@@ DMG ACQ Manager function : %s line : %d AD7699_Init FAILED!!! \n",__FUNCTION__, __LINE__);
++                return (-1);
++        }
++
++
++//    printk(KERN_INFO "DMG ACQ Manager function : %s\n",__FUNCTION__);
++
++        printk(KERN_INFO "DMG ACQ Manager: Thread enabled Hz= %d \n", (2*HZ));
++
++        ktime_get_real_ts(&tm);
++        t1 = tm.tv_nsec + tm.tv_sec * UNSEC_IN_NSEC;
++
++        while (true)
++        {
++                if( isProcessON())
++                {
++                        set_current_state(TASK_UNINTERRUPTIBLE);
++// #if NO_PIN_TOGGLE
++                        debug_gpio_ACQM(GPIO4_PIN10_TP5);
++// #endif
++                        samplingAction();
++                        debug_gpio_ACQM(GPIO4_PIN10_TP5);
++                        best_resolution();
++                }
++                else
++                {
++                        set_current_state(TASK_UNINTERRUPTIBLE);
++                        if (mbVerbose) printk(KERN_INFO "DMG ACQ Manager: ACQ Pause\n");
++// #if NO_PIN_TOGGLE
++                        debug_gpio_ACQM(GPIO4_PIN10_TP5);
++// #endif
++                        mdelay(5*CENTOMSEC_IN_MSEC);
++                        Acq_Storage_ResetAll();
++                        ktime_get_real_ts(&tm);
++                        t1 = tm.tv_nsec + tm.tv_sec * UNSEC_IN_NSEC;
++                }
++                value^=1;
++        }
++        return 0;
++}
++#endif
++
++#if INTERRUPT_MODE
++static int thread_init (void)
++{
++
++        char our_thread[20]="DMG ACQ Manager";
++        /* Inizializza il semaforo */
++        // init_rwsem(&rwsem_lock);
++
++        /* Inizializza l'evento per l'aggancio del thread */
++        mflag = 0;
++        init_waitqueue_head(&tick_event);
++
++        printk(KERN_INFO "DMG ACQ Manager driver initialized.\n");
++
++        // /* Crea il Thread di lettura della SPI */
++        //ts=kthread_run(thread_fn,NULL,"ACQManager Thread");
++        thread1 = kthread_create(thread_fn,NULL,our_thread);
++        if((thread1))
++        {
++                wake_up_process(thread1);
++        }
++
++        //  ktime = ktime_set( 0, MS_TO_NS(delay_in_ms) );
++        //  ktime = ktime_set( 0, 100000 );    /* Valore del timer in nano secondi */
++
++        /* Setta la variabile timeout del timer */
++        ktime = ktime_set( 0, ul_wait_in_nano );
++
++        /* Inizializza l'high Resolution Timer */
++        hrtimer_init( &hr_timer, CLOCK_MONOTONIC, HRTIMER_MODE_REL );
++
++        /* Setta la funzione di callback del timer */
++        hr_timer.function = &ACQM_hrtimer_callback;
++
++        printk( "DMG Starting timer to fire in %ld us (%ld)\n", ul_wait_in_nano, jiffies );
++
++        /* Fa partire il timer */
++        hrtimer_start( &hr_timer, ktime, HRTIMER_MODE_REL );
++
++        return (0);
++
++//    printk(KERN_INFO "%s\n",__FUNCTION__);
++
++
++}
++#endif
++#if RUNNER_MODE
++static int thread_init (void)
++{
++
++        char our_thread[20]="DMG ACQ Manager";
++
++
++//    printk(KERN_INFO "%s\n",__FUNCTION__);
++
++        thread1 = kthread_create(thread_fn,NULL,our_thread);
++
++        if((thread1))
++        {
++                wake_up_process(thread1);
++        }
++
++        return 0;
++}
++#endif
++
++
++#if RUNNER_MODE
++static void thread_cleanup(void)
++{
++        int ret=0;
++
++        //    printk(KERN_INFO "%s\n",__FUNCTION__);
++        ret = kthread_stop(thread1);
++        if(!ret)
++        {
++                printk(KERN_INFO "DMG ACQ Manager: Thread stopped. \n");
++        }
++}
++#endif
++
++#if INTERRUPT_MODE
++static void thread_cleanup(void)
++{
++        int ret;
++
++/* Abilita lo stop del thread */
++        kthread_stop(thread1);
++/* Sblocca il thread per permettergli di fermarsi */
++        mflag = 1;
++        wake_up_interruptible(&tick_event);
++/* Ferma il timer */
++        ret = hrtimer_cancel( &hr_timer );
++        if (ret) printk("The timer was still in use...\n");
++        printk("HR Timer module uninstalling\n");
++};
++
++#endif
++#if RUNNER_MODE
++
++static void best_resolution(void)
++{
++        struct timespec tm;
++        ktime_get_real_ts(&tm);
++        t2 = tm.tv_nsec + tm.tv_sec * UNSEC_IN_NSEC;
++        t1+= ul_wait_in_nano;
++        if(t2 < t1)
++        {
++                ul_semi_period_in_nano  = (unsigned long)(t1-t2);
++                ul_semi_period_in_micro = ( ul_semi_period_in_nano / UNUSEC_IN_NSEC);
++                ul_semi_period_in_milli = ( ul_semi_period_in_nano / UNMSEC_IN_NSEC);
++                if( ul_semi_period_in_milli > 9)
++                {
++
++                }
++                else if ( ul_semi_period_in_micro > 9)
++                {
++                        udelay((unsigned long)(ul_semi_period_in_micro));
++                        //                    if (mbVerbose) printk(KERN_NOTICE "@@@@@@@@@@@@@@@@ %s %d Select = MICRO \n", __FUNCTION__,__LINE__);
++                }
++                else
++                {
++                        ndelay((unsigned long)(ul_semi_period_in_nano));
++                        //                    if (mbVerbose) printk(KERN_NOTICE "@@@@@@@@@@@@@@@@ %s %d Select = NANO \n", __FUNCTION__,__LINE__);
++                }
++        }
++        ktime_get_real_ts(&tm);
++        t1 = tm.tv_nsec + tm.tv_sec * UNSEC_IN_NSEC;
++}
++
++#endif
++
++
++
++static int retrive_data( WORD * data)
++{
++        TBitWord aubChn[4];
++        int iierr=0;
++
++        iierr=AD7699_Acquire();
++        /* Acquisizioni da ADC */
++        if( iierr > 0)
++        {
++                iierr= AD7699_Get(aubChn);
++                /* Lettura dei 4 canali ADC */
++                data[0]=aubChn[0].mWORD;
++                data[1]=aubChn[1].mWORD;
++        }
++        return iierr;
++
++}
++
++
++static int samplingAction (void)
++{
++        WORD data[4] = {0,0,0,0};
++
++        if(retrive_data(data) < 0)
++        {
++                return (-1);
++        }
++
++        /* inside a thread */
++        mutex_lock(&my_lock);
++        Acq_Storage_SetAll2(data);
++        /* do the work with the data you're protecting */
++        mutex_unlock(&my_lock);
++
++        return(0);
++}
++
++
++
++
++
++// extern unsigned int get_Board_version (void);
++
++static ssize_t show_axis(int iiId, char *buf)
++{
++        int iierr=0;
++
++        /* inside a thread */
++        mutex_lock(&my_lock);
++        iierr = Acq_Storage_GetData(iiId, (WORD *)(buf), (WORD)(mul_Sample_Get));
++        /* do the work with the data you're protecting */
++        mutex_unlock(&my_lock);
++//	printk(KERN_INFO "DMG ACQ Manager function : %s\n",__FUNCTION__);
++
++        if(iierr > 0)
++        {
++                iierr*=sizeof(WORD);
++        }
++        return iierr;
++}
++
++
++
++static ssize_t show_available(int iiId, char *buf)
++{
++        int iierr=0;
++
++        /* inside a thread */
++        mutex_lock(&my_lock);
++        iierr = Acq_Storage_DataAvailable(iiId);
++        mutex_unlock(&my_lock);
++        if (mbVerbose) printk(KERN_INFO "DMG ACQ Manager function : %s\n",__FUNCTION__);
++        return sprintf(buf, "%d\n", iierr);
++}
++
++static ssize_t ApplyConfiguration(void)
++{
++        // WAIT TIME SAMPLIG ACQ AXSIS
++        ul_wait_in_nano = ((unsigned long ) (UNSEC_IN_NSEC)/(unsigned long )(mul_AXIS_Freq));
++        if (mbVerbose) printk(KERN_NOTICE "@@@@@@@@@@@@@@@@ %s %d ul_wait_in_nano  = %lu \n", __FUNCTION__,__LINE__, ul_wait_in_nano);
++        if (mbVerbose) printk(KERN_NOTICE "@@@@@@@@@@@@@@@@ %s %d ul_wait_in_micro = %lu \n", __FUNCTION__,__LINE__, ul_semi_period_in_micro);
++        if (mbVerbose) printk(KERN_NOTICE "@@@@@@@@@@@@@@@@ %s %d ul_wait_in_milli = %lu \n", __FUNCTION__,__LINE__, ul_semi_period_in_milli);
++
++
++        hrtimer_cancel( &hr_timer );
++
++
++        /* Setta la variabile timeout del timer */
++        ktime = ktime_set( 0, ul_wait_in_nano );
++        /* Setta la funzione di callback del timer */
++        hr_timer.function = &ACQM_hrtimer_callback;
++        /* Fa partire il timer */
++        hrtimer_start( &hr_timer, ktime, HRTIMER_MODE_REL );
++
++        return(1);
++}
++
++
++
++
++static ssize_t show_Ch01(struct kobject *kobj, struct kobj_attribute *attr, char *buf)
++{
++        return show_axis(AXIS_X,buf);
++}
++static ssize_t show_Ch02(struct kobject *kobj, struct kobj_attribute *attr, char *buf)
++{
++        return show_axis(AXIS_Y,buf);
++}
++// static ssize_t show_Ch03(struct kobject *kobj, struct kobj_attribute *attr, char *buf)
++// {
++//         return show_axis(AXIS_Z,buf);
++// }
++// static ssize_t show_Ch04(struct kobject *kobj, struct kobj_attribute *attr, char *buf)
++// {
++//         return show_axis(AXIS_T,buf);
++// }
++
++
++static ssize_t show_available_Ch01(struct kobject *kobj, struct kobj_attribute *attr, char *buf)
++{
++        return show_available(AXIS_X,buf);
++}
++static ssize_t show_available_Ch02(struct kobject *kobj, struct kobj_attribute *attr, char *buf)
++{
++        return show_available(AXIS_Y,buf);
++}
++// static ssize_t show_available_Ch03(struct kobject *kobj, struct kobj_attribute *attr, char *buf)
++// {
++//         return show_available(AXIS_Z,buf);
++// }
++// static ssize_t show_available_Ch04(struct kobject *kobj, struct kobj_attribute *attr, char *buf)
++// {
++//         return show_available(AXIS_T,buf);
++// }
++
++static ssize_t getHelpConfig(struct kobject *kobj, struct kobj_attribute *attr, char *buf)
++{
++        return sprintf(buf, "[Sampling Frequency in HZ ; Number of sample retrive in a Filesystem reading]  i.e  echo \"[1000;180]\" > configuration\n");
++
++}
++static ssize_t getConfiguration(struct kobject *kobj, struct kobj_attribute *attr, char *buf)
++{
++        return sprintf(buf, "The frequency is: %lu hz Sample: %lu \n", mul_AXIS_Freq, mul_Sample_Get);
++
++}
++
++static ssize_t setConfiguration(struct kobject *kobj, struct kobj_attribute *attr, const char *buf, size_t count)
++{
++        unsigned long ulAXIS_Freq;
++//    unsigned long ulTEMP_Freq;
++        unsigned long ulSample;
++
++
++
++        int iierr = 0;
++
++//    iierr = sscanf( buf, "[%lu;%lu;%lu]", &ulAXIS_Freq ,&ulTEMP_Freq,&ulSample);
++        iierr = sscanf( buf, "[%lu;%lu]", &ulAXIS_Freq,&ulSample);
++
++        if(isProcessON())
++        {
++                printk(KERN_NOTICE "@@@@@@@@@@@@@@@@ Setting Configuration Lock, Stop Acquistion before change the configuration \n");
++                return -EDEADLK;
++        }
++
++        if (iierr < 0)
++        {
++                printk(KERN_NOTICE "@@@@@@@@@@@@@@@@ Error in Frequency Setting range call");
++                return -EINVAL;
++        }
++
++// #define MAX_FREQUENCY_AXSIS_HZ 5000
++// #define MIN_FREQUENCY_AXSIS_HZ 0
++
++
++        if(ulAXIS_Freq < MIN_FREQUENCY_AXSIS_HZ ||  ulAXIS_Freq > MAX_FREQUENCY_AXSIS_HZ )
++        {
++                iierr = -EINVAL;
++                printk(KERN_NOTICE "@@@@@@@@@@@@@@@@ Setting Frequency AXIS invalid range! Accepted [ %lu : %lu ] recive %lu\n", MIN_FREQUENCY_AXSIS_HZ,MAX_FREQUENCY_AXSIS_HZ,ulAXIS_Freq);
++                return iierr;
++        }
++
++        if(ulSample < MIN_SAMPLE_GET ||  ulSample > MAX_SAMPLE_GET )
++        {
++                iierr = -EINVAL;
++                printk(KERN_NOTICE "@@@@@@@@@@@@@@@@ Setting Number Sample available invalid range! Accepted [ %d : %d]  recive %lu\n",MIN_SAMPLE_GET, MAX_SAMPLE_GET, ulSample);
++                return iierr;
++        }
++
++
++
++        mul_AXIS_Freq = (unsigned long)(ulAXIS_Freq & 0XFFFFFF);
++        if (mbVerbose) printk(KERN_NOTICE "@@@@@@@@@@@@@@@@ Setting Frequency AXIS = %lu in value = %lu\n", mul_AXIS_Freq, ulAXIS_Freq );
++
++        mul_Sample_Get = (unsigned long)(ulSample & 0XFFF);
++        if (mbVerbose) printk(KERN_NOTICE "@@@@@@@@@@@@@@@@ Setting Sample Get = %lu in value = %lu\n", mul_Sample_Get, ulSample );
++
++
++        ApplyConfiguration();
++
++        return count;
++
++}
++
++
++
++
++
++static ssize_t getState(struct kobject *kobj, struct kobj_attribute *attr, char *buf)
++{
++
++        int ret = -EINVAL;
++        unsigned char ucValue;
++
++        ucValue=isProcessON();
++
++        if( ucValue )
++        {
++                ret = sprintf(buf,"ACQ Process is ON Value =%d\n", ucValue);
++        }
++        else
++        {
++                ret = sprintf(buf,"ACQ Process is OFF Value =%d\n", ucValue);
++        }
++        return ret;
++}
++
++
++static ssize_t turnOnOFF(struct kobject *kobj, struct kobj_attribute *attr, const char *buf, size_t count)
++{
++        unsigned long val;
++
++        if (kstrtoul(buf, 10, &val))
++        {
++                if (mbVerbose) printk(KERN_NOTICE "@@@@@@@@@@@@@@@@ %s line %d  error 0001\n", __FUNCTION__, __LINE__ );
++                return -EINVAL;
++        }
++
++        if (val == 1)
++        {
++                SetProcessONOFF(1);
++                if (mbVerbose) printk(KERN_NOTICE "@@@@@@@@@@@@@@@@ %s line %d  SetProcessONOFF(1)\n", __FUNCTION__, __LINE__ );
++        }
++        else if (val == 0)
++        {
++                SetProcessONOFF(0);
++                if (mbVerbose) printk(KERN_NOTICE "@@@@@@@@@@@@@@@@ %s line %d  SetProcessONOFF(0)\n", __FUNCTION__, __LINE__ );
++        }
++        else
++        {
++                if (mbVerbose) printk(KERN_NOTICE "@@@@@@@@@@@@@@@@ %s line %d  error 0002\n", __FUNCTION__, __LINE__ );
++                return -ERANGE;
++        }
++        return (count);
++}
++
++
++static ssize_t setVerbose(struct kobject *kobj, struct kobj_attribute *attr, const char *buf, size_t count)
++{
++        unsigned long val;
++
++        if (kstrtoul(buf, 10, &val))
++        {
++                return -EINVAL;
++        }
++
++        mbVerbose = false;
++        if(val)
++        {
++                mbVerbose = true;
++        }
++
++        return count;
++}
++
++
++static ssize_t setLoadSample(struct kobject *kobj, struct kobj_attribute *attr, const char *buf, size_t count)
++{
++
++        unsigned long ulSample;
++        int iierr = 0;
++
++        iierr = sscanf( buf, "%lu",&ulSample);
++        if (iierr < 0)
++        {
++                if (mbVerbose) printk(KERN_NOTICE "@@@@@@@@@@@@@@@@ Error in Frequency Setting range call");
++                return -EINVAL;
++        }
++        if(ulSample < MIN_SAMPLE_GET ||  ulSample > MAX_SAMPLE_GET )
++        {
++                iierr = -EINVAL;
++                if (mbVerbose) printk(KERN_NOTICE "@@@@@@@@@@@@@@@@ Setting Number Sample available invalid range! Accepted [ %d : %d]  recive %lu\n",MIN_SAMPLE_GET, MAX_SAMPLE_GET, ulSample);
++                return iierr;
++        }
++        mul_Sample_Get = (unsigned long)(ulSample & 0XFFF);
++        if (mbVerbose) printk(KERN_NOTICE "@@@@@@@@@@@@@@@@ Setting Sample Get = %lu in value = %lu\n", mul_Sample_Get, ulSample );
++        return count;
++}
++
++
++
++// static struct kobj_attribute foo_attribute =__ATTR(testDriver, 660, foo_show,NULL);
++
++static struct kobj_attribute kobj_attr_Ch01      =__ATTR(Ch01, S_IRUGO, show_Ch01, NULL             );
++static struct kobj_attribute kobj_attr_Ch02      =__ATTR(Ch02, S_IRUGO, show_Ch02, NULL             );
++// static struct kobj_attribute kobj_attr_Ch03      =__ATTR(Ch03, S_IRUGO, show_Ch03, NULL             );
++// static struct kobj_attribute kobj_attr_Ch04      =__ATTR(Ch04, S_IRUGO, show_Ch04, NULL             );
++
++static struct kobj_attribute kobj_attr_config      =__ATTR(configure, S_IRUGO | S_IWUSR, getConfiguration, setConfiguration );
++static struct kobj_attribute kobj_attr_state       =__ATTR(state, S_IRUGO | S_IWUSR, getState, turnOnOFF        );
++static struct kobj_attribute kobj_attr_verbose     =__ATTR(verbose,           S_IWUSR, NULL, setVerbose       );
++static struct kobj_attribute kobj_attr_setsample   =__ATTR(setSample,           S_IWUSR, NULL, setLoadSample    );
++
++static struct kobj_attribute kobj_attr_available_Ch01 =__ATTR(available_Ch01, S_IRUGO, show_available_Ch01, NULL             );
++static struct kobj_attribute kobj_attr_available_Ch02 =__ATTR(available_Ch02, S_IRUGO, show_available_Ch02, NULL             );
++// static struct kobj_attribute kobj_attr_available_Ch03 =__ATTR(available_Ch03, S_IRUGO, show_available_Ch03, NULL             );
++// static struct kobj_attribute kobj_attr_available_Ch04 =__ATTR(available_Ch04, S_IRUGO, show_available_Ch04, NULL             );
++
++static struct kobj_attribute kobj_attr_helpconfig  =__ATTR(helpconfig, S_IRUGO, getHelpConfig, NULL             );
++
++
++// static struct attribute *mid_att_als[] = {
++//         &kobj_attr_Ch01.attr,
++//         &kobj_attr_Ch02.attr,
++//         &kobj_attr_Ch03.attr,
++//         &kobj_attr_Ch04.attr,
++//         &kobj_attr_available_Ch01.attr,
++//         &kobj_attr_available_Ch02.attr,
++//         &kobj_attr_available_Ch03.attr,
++//         &kobj_attr_available_Ch04.attr,
++//         &kobj_attr_config.attr,
++//         &kobj_attr_state.attr,
++//         &kobj_attr_setsample.attr,
++//         &kobj_attr_helpconfig.attr,
++//         &kobj_attr_verbose.attr,
++//         NULL
++// };
++
++static struct attribute *mid_att_als[] = {
++        &kobj_attr_Ch01.attr,
++        &kobj_attr_Ch02.attr,
++        &kobj_attr_available_Ch01.attr,
++        &kobj_attr_available_Ch02.attr,
++        &kobj_attr_config.attr,
++        &kobj_attr_state.attr,
++        &kobj_attr_setsample.attr,
++        &kobj_attr_helpconfig.attr,
++        &kobj_attr_verbose.attr,
++        NULL
++};
++
++
++static struct attribute_group m_als_gr = {
++        .name = "dmgacqmanager",
++        .attrs = mid_att_als
++};
++
++
++
++
++static int __init mymodule_init (void)
++{
++        int error = 0;
++
++//    pr_debug("Module initialized successfully \n");
++
++        printk(KERN_INFO "DMG ACQ Manager driver enable : %s\n",__FUNCTION__);
++
++        mutex_init(&my_mutex);
++        Acq_Storage_Init();
++
++        dmg_kobject = kobject_create_and_add("dmgACQ", kernel_kobj);
++        if(!dmg_kobject)
++        {
++                printk(KERN_INFO "DMG ACQ Manager : %s Function error 0001 \n",__FUNCTION__);
++                return -ENOMEM;
++        }
++
++        error = sysfs_create_group(dmg_kobject, &m_als_gr);
++        if (error)
++        {
++                sysfs_remove_group(dmg_kobject,&m_als_gr);
++                printk(KERN_INFO "DMG ACQ Manager : %s Function error 0002 \n",__FUNCTION__);
++                return -ENODEV;
++        }
++        error=thread_init();
++
++        printk(KERN_INFO "DMG ACQ Manager driver initialized.\n");
++        return error;
++}
++
++static void __exit mymodule_exit (void)
++{
++//   printk(KERN_INFO "DMG ACQ Manager function : %s\n",__FUNCTION__);
++        printk(KERN_INFO "DMG ACQ Manager driver exit.\n");
++        thread_cleanup();
++        kobject_put(dmg_kobject);
++}
++
++module_init(mymodule_init);
++module_exit(mymodule_exit);
++MODULE_LICENSE("GPL");
++MODULE_AUTHOR("Gai Ing. Andrea");
+diff --git a/drivers/dmg/ACQManager/Acq_Storage.c b/drivers/dmg/ACQManager/Acq_Storage.c
+new file mode 100644
+index 0000000..9fa4c65
+--- /dev/null
++++ b/drivers/dmg/ACQManager/Acq_Storage.c
+@@ -0,0 +1,578 @@
++/*********************************************************************************/
++/*!  \file  Acq_Storage.c
++   \brief
++
++   Modulo per la gestione buffer circolari
++
++   \author  Andrea Gai
++   \date    2016_10_18
++ */
++/*********************************************************************************/
++
++/*********************************************************************************/
++/*                            INCLUDE                                            */
++/*********************************************************************************/
++#include "DEF_COMP.h"
++#if PC==0
++#include <linux/string.h>
++#include <linux/printk.h>
++#include <linux/slab.h>
++#else
++#include <string.h>
++#include <stdio.h>
++#include <stdlib.h>
++#endif
++
++#include "Acq_Storage.h"
++
++/*###############################################################################*/
++/*###############################################################################*/
++/*###############################################################################*/
++/*                            DECLARATION                                        */
++/*###############################################################################*/
++
++typedef struct CB_Data_Structure {
++        WORD ins; // insersore
++        WORD est; // estrattore
++        WORD diff; // diff
++        WORD next; // next insersore
++        WORD front; // insersore maggiore di estrattore
++        WORD buf[CB_BUFLEN]; // buffer circolare
++} CB_DATA_STRUCT;
++
++/*********************************************************************************/
++/*                            PRIVATE CONST                                      */
++/*********************************************************************************/
++#if PC
++#define GFP_ATOMIC 0
++#endif
++/*********************************************************************************/
++/*                            PRIVATE VARIABLE                                   */
++/*********************************************************************************/
++
++#if KALLOCK_MEM
++static CB_DATA_STRUCT * pstAxis_X; // struttura gestione dati asse X
++static CB_DATA_STRUCT * pstAxis_Y; // struttura gestione dati asse Y
++#if TEMPERATURE_MANAGED
++static CB_DATA_STRUCT * pstAxis_Z; // struttura gestione dati asse Z
++static CB_DATA_STRUCT * pstAxis_T; // struttura gestione dati asse Temperatura
++#endif
++
++#else
++static CB_DATA_STRUCT stAxis_X; // struttura gestione dati asse X
++static CB_DATA_STRUCT stAxis_Y; // struttura gestione dati asse Y
++#if TEMPERATURE_MANAGED
++static CB_DATA_STRUCT stAxis_Z; // struttura gestione dati asse Z
++static CB_DATA_STRUCT stAxis_T; // struttura gestione dati asse Temperatura
++#endif
++
++#endif
++
++
++
++#if TEST
++static WORD mm_iicrt = 0;
++static WORD mm_iiTemp = 10000;
++#endif
++/*********************************************************************************/
++/*                            PRIVATE FUNCTION                                   */
++/*********************************************************************************/
++int Acq_Update_Index (int id );
++CB_DATA_STRUCT *Acq_GetPointer(int id );
++#if PC
++void * kmalloc(size_t size, int flags);
++#endif
++/*********************************************************************************/
++/*                            PUBLIC VARIABLE                                    */
++/*********************************************************************************/
++
++/*###############################################################################*/
++/*###############################################################################*/
++/*###############################################################################*/
++/*                                    CODE                                       */
++/*###############################################################################*/
++
++/*********************************************************************************/
++/*                            PRIVATE FUNCTION CODE                              */
++/*********************************************************************************/
++
++/*********************************************************************************/
++/*                            PUBLIC FUNCTION  CODE                              */
++/*********************************************************************************/
++/*********************************************************************************/
++/*! \fn    void bios_Uart0_Init ( BYTE format )
++   \brief Inizializza Porta
++
++   Routine che gestisce l'inizializzazione della UART0 compilata su PC
++   che simula M16.
++   \param     format indica il formato e il baudeRate (vd enum FORMAT_COM)
++   \return    valore restituito
++ */
++/*********************************************************************************/
++int Acq_Storage_Init(void)
++{
++
++#if KALLOCK_MEM
++        pstAxis_X = kmalloc(sizeof(CB_DATA_STRUCT), GFP_ATOMIC);
++        pstAxis_Y = kmalloc(sizeof(CB_DATA_STRUCT), GFP_ATOMIC);
++
++        memset((void *) (pstAxis_X), 0x00, sizeof(CB_DATA_STRUCT));
++        memset((void *) (pstAxis_Y), 0x00, sizeof(CB_DATA_STRUCT));
++
++#if TEMPERATURE_MANAGED
++        pstAxis_Z = kmalloc(sizeof(CB_DATA_STRUCT), GFP_ATOMIC);
++        memset((void *) (pstAxis_Z), 0x00, sizeof(CB_DATA_STRUCT));
++
++        pstAxis_T = kmalloc(sizeof(CB_DATA_STRUCT), GFP_ATOMIC);
++        memset((void *) (pstAxis_T), 0x00, sizeof(CB_DATA_STRUCT));
++#endif
++
++
++#else
++        memset((void *) (&stAxis_X), 0x00, sizeof(CB_DATA_STRUCT));
++        memset((void *) (&stAxis_Y), 0x00, sizeof(CB_DATA_STRUCT));
++
++#if TEMPERATURE_MANAGED
++        memset((void *) (&stAxis_T), 0x00, sizeof(stAxis_T));
++        memset((void *) (&stAxis_Z), 0x00, sizeof(CB_DATA_STRUCT));
++
++#endif
++#endif
++        return (1);
++}
++
++
++/*********************************************************************************/
++/*! \fn    int Acq_Storage_GetData(int id , WORD *Outbuf)
++   \brief Get dati
++
++   Routine che preleva CB_BUFLEN bytes dalla coda del buffer
++   \return   -1 se la coda e' vuota, altrimenti il numero di byte copiati sul
++           buffer passato come parametro
++ */
++/*********************************************************************************/
++int Acq_Storage_GetData(int id, WORD *Outbuf, WORD number)
++{
++        int numdatamax = 0;
++        int numdata1 = 0;
++        int numdata2 = 0;
++        int numdata  = -1;
++        int endIndex = 0;
++        int available = 0;
++
++        CB_DATA_STRUCT * pstrData= NULL;
++
++        pstrData = Acq_GetPointer (id);
++        if( pstrData == NULL)
++        {
++                return -3;
++        }
++
++
++        numdatamax = number;
++
++        if(numdatamax > EXPORT_LIMT )
++        {
++                numdatamax = EXPORT_LIMT;
++        }
++
++
++
++        available = pstrData->diff-1;
++
++        if(numdatamax > available)
++        {
++                numdatamax = available;
++//      printk(KERN_INFO "@@@@@@@@@@@@@@@@@@@@@  DMG ACQ  available=%d number=%d numdatamax=%d \n",available, number, numdatamax);
++//                return (0);
++        }
++
++        endIndex = pstrData->est+numdatamax;
++
++        if(endIndex < CB_BUFLEN)
++        {
++                numdata1 = numdatamax;
++                numdata2 = 0;
++        }
++        else
++        {
++                numdata1 = (CB_BUFLEN - pstrData->est);
++                numdata2 = (endIndex % CB_BUFLEN);
++        }
++
++        numdata = (numdata1 + numdata2);
++
++
++        if(numdata1 > 0)
++        {
++                memcpy((Outbuf         ),&(pstrData->buf[pstrData->est]),(numdata1 *sizeof(WORD)));
++        }
++        if(numdata2 > 0)
++        {
++                memcpy((Outbuf+numdata1),&(pstrData->buf[0           ]),(numdata2 * sizeof(WORD)));
++        }
++
++        pstrData->est = (endIndex % CB_BUFLEN);
++
++
++        if(pstrData->next > pstrData->est)
++        {
++                pstrData->diff=(pstrData->next - pstrData->est);
++        }
++        else
++        {
++                pstrData->diff=(pstrData->next + CB_BUFLEN);
++                pstrData->diff= pstrData->diff - pstrData->est;
++        }
++
++
++        return (numdata);
++}
++
++
++
++/*********************************************************************************/
++/*! \fn    int Acq_Storage_DataAvailable(int id)
++   \brief dati disponibili da prelevare
++
++   Routine il numero di byte disponibili per ID di parametro passato
++   \return   -1 se la coda e' vuota, altrimenti il numero byte disponibili.
++ */
++/*********************************************************************************/
++int Acq_Storage_DataAvailable(int id)
++{
++
++        CB_DATA_STRUCT * pstrData= NULL;
++        pstrData = Acq_GetPointer (id);
++        if( pstrData == NULL)
++        {
++                return -3;
++        }
++
++        if (pstrData->diff > 0)
++        {
++                return (pstrData->diff - 1);
++        }
++        return (0);
++
++
++}
++
++
++
++
++
++/*********************************************************************************/
++/*! \fn    void Acq_Storage_SetAll(WORD dataX,WORD dataY,WORD dataZ)
++   \brief Set all Storage
++
++   inserisce in ogni buffer circolare il proprio dato
++
++ */
++/*********************************************************************************/
++void Acq_Storage_SetAll(WORD dataX,WORD dataY,WORD dataZ)
++{
++#if PC==1
++        (void)dataX;
++        (void)dataY;
++        (void)dataZ;
++#endif
++
++
++#if KALLOCK_MEM
++
++#if TEST
++        mm_iicrt++;
++
++
++        pstAxis_X->buf[pstAxis_X->ins] = (WORD)(mm_iicrt); //(WORD) (dataX & 0xFFFF);
++        Acq_Update_Index(AXIS_X);
++
++        pstAxis_Y->buf[pstAxis_Y->ins] = (WORD)(mm_iicrt); //(WORD) (dataY & 0xFFFF);
++        Acq_Update_Index(AXIS_Y);
++#if TEMPERATURE_MANAGED
++        pstAxis_Z->buf[pstAxis_Z->ins] = (WORD)(mm_iicrt); //(WORD) (dataZ & 0xFFFF);
++        Acq_Update_Index(AXIS_Z);
++#endif
++        mm_iicrt = (mm_iicrt % COUNTER_TEST );
++#else
++
++        pstAxis_X->buf[pstAxis_X->ins] = (WORD) (dataX & 0xFFFF);
++        Acq_Update_Index(AXIS_X);
++
++        pstAxis_Y->buf[pstAxis_Y->ins] = (WORD) (dataY & 0xFFFF);
++        Acq_Update_Index(AXIS_Y);
++#if TEMPERATURE_MANAGED
++        pstAxis_Z->buf[pstAxis_Z->ins] = (WORD) (dataZ & 0xFFFF);
++        Acq_Update_Index(AXIS_Z);
++#endif
++#endif
++
++
++
++
++#else
++
++#if TEST
++        mm_iicrt++;
++
++
++        stAxis_X.buf[stAxis_X.ins] = (WORD)(mm_iicrt); //(WORD) (dataX & 0xFFFF);
++        Acq_Update_Index(AXIS_X);
++
++        stAxis_Y.buf[stAxis_Y.ins] = (WORD)(mm_iicrt); //(WORD) (dataY & 0xFFFF);
++        Acq_Update_Index(AXIS_Y);
++#if TEMPERATURE_MANAGED
++        stAxis_Z.buf[stAxis_Z.ins] = (WORD)(mm_iicrt); //(WORD) (dataZ & 0xFFFF);
++        Acq_Update_Index(AXIS_Z);
++#endif
++        mm_iicrt = (mm_iicrt % COUNTER_TEST );
++#else
++
++        stAxis_X.buf[stAxis_X.ins] = (WORD) (dataX & 0xFFFF);
++        Acq_Update_Index(AXIS_X);
++
++        stAxis_Y.buf[stAxis_Y.ins] = (WORD) (dataY & 0xFFFF);
++        Acq_Update_Index(AXIS_Y);
++#if TEMPERATURE_MANAGED
++        stAxis_Z.buf[stAxis_Z.ins] = (WORD) (dataZ & 0xFFFF);
++        Acq_Update_Index(AXIS_Z);
++#endif
++#endif
++
++#endif
++
++}
++
++/*********************************************************************************/
++/*! \fn    void Acq_Storage_SetAll(WORD dataX,WORD dataY,WORD dataZ,WORD dataT)
++   \brief Set all Storage
++
++   inserisce in ogni buffer circolare il proprio dato
++
++ */
++/*********************************************************************************/
++void Acq_Storage_SetAll2(WORD * data)
++{
++#if PC==1
++        (void)data;
++#endif
++
++#if TEST
++        mm_iicrt++;
++
++
++        pstAxis_X->buf[pstAxis_X->ins] = (WORD)(mm_iicrt); //(WORD) (data[0] & 0xFFFF);
++        Acq_Update_Index(AXIS_X);
++
++        pstAxis_Y->buf[pstAxis_Y->ins] = (WORD)(mm_iicrt); //(WORD) (data[1] & 0xFFFF);
++        Acq_Update_Index(AXIS_Y);
++#if TEMPERATURE_MANAGED
++        pstAxis_Z->buf[pstAxis_Z->ins] = (WORD)(mm_iicrt); //(WORD) (data[2] & 0xFFFF);
++        Acq_Update_Index(AXIS_Z);
++
++        pstAxis_T->buf[pstAxis_T->ins] = (WORD)(mm_iicrt); //(WORD) (data[3] & 0xFFFF);
++        Acq_Update_Index(AXIS_T);
++#endif
++        mm_iicrt = (mm_iicrt % COUNTER_TEST );
++
++#else
++
++        pstAxis_X->buf[pstAxis_X->ins] = (WORD) (data[0] & 0xFFFF);
++        Acq_Update_Index(AXIS_X);
++
++        pstAxis_Y->buf[pstAxis_Y->ins] = (WORD) (data[1] & 0xFFFF);
++        Acq_Update_Index(AXIS_Y);
++#if TEMPERATURE_MANAGED
++        pstAxis_Z->buf[pstAxis_Z->ins] = (WORD) (data[2] & 0xFFFF);
++        Acq_Update_Index(AXIS_Z);
++
++        pstAxis_T->buf[pstAxis_T->ins] = (WORD) (data[3] & 0xFFFF);
++        Acq_Update_Index(AXIS_T);
++    #endif
++
++#endif
++
++
++}
++
++/*********************************************************************************/
++/*! \fn    void Acq_Storage_SetOne(int id, WORD dataIn)
++   \brief Memorizza un dato in uno Storage
++
++   inserisce un dato nel  buffer circolare selezionato tramite ID
++
++ */
++/*********************************************************************************/
++int Acq_Storage_SetOne(int id, WORD dataIn)
++{
++#if PC==1
++        (void)dataIn;
++#endif
++
++        CB_DATA_STRUCT * pstrData= NULL;
++
++        pstrData = Acq_GetPointer (id);
++        if( pstrData == NULL)
++        {
++                return -3;
++        }
++
++#if TEST
++        pstrData->buf[pstrData->ins] = (WORD)(mm_iiTemp);
++        mm_iiTemp = ((mm_iiTemp+1) % COUNTER_TEST );
++#else
++        pstrData->buf[pstrData->ins] = (WORD) (dataIn & 0xFFFF);
++#endif
++        Acq_Update_Index(id);
++        return 0;
++
++}
++
++
++/*********************************************************************************/
++/*! \fn    void Acq_Storage_ResetAll(void)
++   \brief Clear buffer Fast
++
++   Esegue la pulitura dei buffer di memorizzaione
++ */
++/*********************************************************************************/
++void Acq_Storage_ResetAll(void)
++{
++#if KALLOCK_MEM
++        memset((void *) (pstAxis_X), 0x00, sizeof(CB_DATA_STRUCT));
++        memset((void *) (pstAxis_Y), 0x00, sizeof(CB_DATA_STRUCT));
++
++#if TEMPERATURE_MANAGED
++        memset((void *) (pstAxis_T), 0x00, sizeof(CB_DATA_STRUCT));
++        memset((void *) (pstAxis_Z), 0x00, sizeof(CB_DATA_STRUCT));
++#endif
++
++
++
++#else
++        memset((void *) (&stAxis_X), 0x00, sizeof(CB_DATA_STRUCT));
++        memset((void *) (&stAxis_Y), 0x00, sizeof(CB_DATA_STRUCT));
++
++#if TEMPERATURE_MANAGED
++        memset((void *) (&stAxis_T), 0x00, sizeof(CB_DATA_STRUCT));
++        memset((void *) (&stAxis_Z), 0x00, sizeof(CB_DATA_STRUCT));
++#endif
++#endif
++}
++
++/*********************************************************************************/
++/*! \fn    int Acq_Update_Index(int id )
++   \brief Aggiorna indice insersore e previne l'auto avvolgimento
++
++   Esegue la pulitura dei buffer di memorizzaione
++ */
++/*********************************************************************************/
++int Acq_Update_Index(int id )
++{
++
++        CB_DATA_STRUCT * pstrData= NULL;
++
++        pstrData = Acq_GetPointer (id);
++        if( pstrData == NULL)
++        {
++                return -3;
++        }
++
++        pstrData->next = (pstrData->ins + 1) % CB_BUFLEN;
++
++        if(pstrData->next > pstrData->est)
++        {
++                pstrData->diff=(pstrData->next - pstrData->est);
++        }
++        else
++        {
++                pstrData->diff=(pstrData->next + CB_BUFLEN);
++                pstrData->diff= pstrData->diff - pstrData->est;
++        }
++
++        if(pstrData->diff < CB_BUFLEN)
++        {
++                pstrData->ins=pstrData->next;
++        }
++        else
++        {
++                pstrData->ins=pstrData->next;
++                pstrData->est=(pstrData->est + 1) % CB_BUFLEN;
++#if !PC
++                //	printk(KERN_INFO "@@@@@@@@@@@@@@@@@@@@@  DMG AUI i=%d e=%d \n",pstrData->ins, pstrData->est);
++#else
++                //    printf("DMG AUI i=%d e=%d \n",pstrData->ins, pstrData->est);
++#endif
++        }
++
++        if(pstrData->ins > pstrData->est)
++        {
++                pstrData->front = 1;
++        }
++        else
++        {
++                pstrData->front = 0;
++        }
++
++        return(0);
++}
++
++CB_DATA_STRUCT * Acq_GetPointer ( int id )
++{
++
++#if KALLOCK_MEM
++        switch (id)
++        {
++        case AXIS_X:
++                return (pstAxis_X);
++                break;
++        case AXIS_Y:
++                return (pstAxis_Y);
++                break;
++#if TEMPERATURE_MANAGED
++        case AXIS_Z:
++                return(pstAxis_Z);
++                break;
++
++        case AXIS_T:
++                return(pstAxis_T);
++                break;
++#endif
++        default:
++                return NULL;
++        }
++        return NULL;
++#else
++        switch (id)
++        {
++        case AXIS_X:
++                return (&stAxis_X);
++                break;
++        case AXIS_Y:
++                return (&stAxis_Y);
++                break;
++#if TEMPERATURE_MANAGED
++        case AXIS_Z:
++                return(&stAxis_Z);
++                break;
++
++        case AXIS_T:
++                return(&stAxis_T);
++                break;
++#endif
++        default:
++                return NULL;
++        }
++        return NULL;
++#endif
++
++}
++
++#if PC
++void * kmalloc(size_t size, int flags)
++{
++        (void)flags;
++        return (malloc(size));
++}
++#endif
+diff --git a/drivers/dmg/ACQManager/Acq_Storage.h b/drivers/dmg/ACQManager/Acq_Storage.h
+new file mode 100644
+index 0000000..da413aa
+--- /dev/null
++++ b/drivers/dmg/ACQManager/Acq_Storage.h
+@@ -0,0 +1,96 @@
++/*********************************************************************************/
++/*!  \file  Acq_Storage.h
++     \brief Header Acq_Storage.c
++
++   File intestazione di Acq_Storage.h per la gestione buffer circolari
++
++    \author  Andrea Gai
++    \date    2016_10_18
++ */
++/*********************************************************************************/
++
++#ifndef _ACQ_STORAGE_H
++#define _ACQ_STORAGE_H 1
++
++
++/*###############################################################################*/
++/*********************************************************************************/
++/*                            INCLUDE                                            */
++/*********************************************************************************/
++#include "DEF_COMP.h"
++#include "TYPEDEFS.H"
++/*********************************************************************************/
++/*                            DEFINE                                             */
++/*********************************************************************************/
++#define TEST 0
++#define TEMPERATURE_MANAGED  0
++#define KALLOCK_MEM  1
++
++
++
++
++
++#if !PC
++  #if KALLOCK_MEM
++      #define CB_BUFLEN     10000
++//      #define CB_BUFLEN     60000
++  #else
++     #if TEMPERATURE_MANAGED
++         #define CB_BUFLEN     4000
++     #else
++          #define CB_BUFLEN     8000
++     #endif
++   #endif
++   #define EXPORT_LIMT   200
++#else
++   #define CB_BUFLEN     100
++   #define EXPORT_LIMT   50
++#endif
++
++#define COUNTER_TEST  60000
++
++
++
++
++//
++
++
++enum ID_AXIS
++{
++        AXIS_X = 0,
++        AXIS_Y = 1,
++#if TEMPERATURE_MANAGED
++        AXIS_Z = 2,
++        AXIS_T = 3,
++#endif
++        NUM_AXIS
++};
++
++
++/*********************************************************************************/
++/*                            TYPES                                              */
++/*********************************************************************************/
++/*********************************************************************************/
++/*                            PUBLIC CONST                                       */
++/*********************************************************************************/
++/*********************************************************************************/
++/*                            PUBLIC VARIABLE                                    */
++/*********************************************************************************/
++
++/*********************************************************************************/
++/*                            PUBLIC FUNCTION                                    */
++/*********************************************************************************/
++int  Acq_Storage_Init          (void);
++//int  Acq_Storage_GetData       (int id , WORD *Outbuf);
++int  Acq_Storage_GetData       (int id, WORD *Outbuf, WORD number);
++int  Acq_Storage_DataAvailable (int id);
++void Acq_Storage_SetAll        (WORD dataX,WORD dataY,WORD dataZ);
++void Acq_Storage_SetAll2       (WORD * data);
++int  Acq_Storage_SetOne        (int id, WORD dataIn);
++void Acq_Storage_ResetAll      (void);
++
++
++/*###############################################################################*/
++
++
++#endif //_ACQ_STORAGE_H
+diff --git a/drivers/dmg/ACQManager/DEF_COMP.h b/drivers/dmg/ACQManager/DEF_COMP.h
+new file mode 100644
+index 0000000..b5f8f8e
+--- /dev/null
++++ b/drivers/dmg/ACQManager/DEF_COMP.h
+@@ -0,0 +1,53 @@
++/*********************************************************************************/
++/*!  \file  DEF_COMP.h
++     \brief Define di compilazione
++
++File include contenente tutti i settaggi di compilazione
++*/
++/*********************************************************************************/
++
++#ifndef __DEF_COMP_H
++#define __DEF_COMP_H  1
++
++
++/*###############################################################################*/
++/*********************************************************************************/
++/*                            INCLUDE                                            */
++/*********************************************************************************/
++/*********************************************************************************/
++/*                            DEFINE                                             */
++/*********************************************************************************/
++#define PC            	0  //!< Definire 1 se si vuole compilare su PC
++                           //!<
++
++#define DEBUG_CONFIGURATION 0 //!< Definire 1 se si vuole compilare in modalita' Debug
++                              //!<
++#define LOG_ON        	0  //!< Definire 1 se si vuole attivare le funzioni
++                           //!< di scrittura del modulo log
++#define VISUAL_ERR    	0  //!< Definire 1 se si vuole attivare le stringhe di errore
++                           //!<
++#define TEST_PROP_FILE  0  //!< Definire 1 se si vuole attivare le funzioni
++                           //!< di test del file di property
++
++#define GCF_LITTLE_ENDIAN 0 // Big_Endian = 0 Little_Endian = 1
++
++
++
++/*********************************************************************************/
++/*                            TYPES                                              */
++/*********************************************************************************/
++/*********************************************************************************/
++/*                            PUBLIC CONST                                       */
++/*********************************************************************************/
++/*********************************************************************************/
++/*                            PUBLIC VARIABLE                                    */
++/*********************************************************************************/
++/*********************************************************************************/
++/*                            PUBLIC FUNCTION                                    */
++/*********************************************************************************/
++
++/*###############################################################################*/
++
++
++
++#endif      // __DEF_COMP_H
+diff --git a/drivers/dmg/ACQManager/Kconfig b/drivers/dmg/ACQManager/Kconfig
+new file mode 100644
+index 0000000..8c6567c
+--- /dev/null
++++ b/drivers/dmg/ACQManager/Kconfig
+@@ -0,0 +1,9 @@
++#
++# Acquisition Manager
++#
++
++config ACQ_MAN_DRIVER
++	tristate "Acquisition Manager device driver support"
++	default y
++	---help---
++	  Pantografo Acquisition Manager.
+diff --git a/drivers/dmg/ACQManager/Makefile b/drivers/dmg/ACQManager/Makefile
+new file mode 100644
+index 0000000..a35640a
+--- /dev/null
++++ b/drivers/dmg/ACQManager/Makefile
+@@ -0,0 +1,2 @@
++
++obj-$(CONFIG_ACQ_MAN_DRIVER)	+= AcqManager.o
+diff --git a/drivers/dmg/ACQManager/TYPEDEFS.H b/drivers/dmg/ACQManager/TYPEDEFS.H
+new file mode 100644
+index 0000000..c14d6b0
+--- /dev/null
++++ b/drivers/dmg/ACQManager/TYPEDEFS.H
+@@ -0,0 +1,155 @@
++/*********************************************************************************/
++/*!  \file  TYPEDEFS.h
++     \brief Definizione tipi
++
++File include delle difinizione di tipi.
++    \author  Francesca Biagioni
++    \date    17_Dic_2009 
++*/
++/*********************************************************************************/
++
++#include "DEF_COMP.h"
++#ifndef __TYPEDEFS_H
++#define __TYPEDEFS_H
++
++
++/*###############################################################################*/
++/*********************************************************************************/
++/*                            INCLUDE                                            */
++/*********************************************************************************/
++/*********************************************************************************/
++/*                            DEFINE                                             */
++/*********************************************************************************/
++
++
++#ifndef FALSE
++#define FALSE (1 == 0)
++#endif
++
++#ifndef TRUE
++#define TRUE  (1 == 1)
++#endif
++
++#define VOID            void
++
++
++#define LOBYTE(w)       ( (BYTE) (w) )
++#define HIBYTE(w)       ( (BYTE) ( (UINT) (w)>>8 ))
++#define LOWORD(l)       ( (WORD) (l) )
++#define HIWORD(l)       ( (WORD) ( (DWORD) (l)>>16 ))
++#define MAKELONG(lo,hi) ((LONG)(((WORD)(lo))|(((DWORD)((WORD)(hi)))<<16)))
++#define MAKEWORD(lo,hi) ((WORD)(((BYTE)(lo))|(((WORD)((BYTE)(hi)))<<8)))
++
++///*********************************************************************************/
++///*                            TYPES                                              */
++///*********************************************************************************/
++typedef unsigned char   BYTE;
++typedef unsigned short  US;
++typedef unsigned int    UI;
++typedef unsigned long   UL;
++typedef double          D;
++typedef unsigned char   UCHAR;
++typedef unsigned short  WORD;
++typedef unsigned int    DWORD;
++
++typedef unsigned short  USHORT;
++
++typedef unsigned char   BOOL;
++typedef signed   long   LONG;
++typedef unsigned long   ULONG;
++
++typedef          char*  PSTR;
++typedef const    char*  PCSTR;
++typedef          BYTE*  PBYTE;
++typedef          int*   PINT;
++typedef          WORD*  PWORD;
++typedef          long*  PLONG;
++typedef          DWORD* PDWORD;
++
++typedef const    char   CSTR;
++
++typedef struct   { BYTE D0:1, D1:1, D2:1, D3:1, D4:1, D5:1, D6:1, D7:1;} BBIT;
++
++
++
++#if GCF_LITTLE_ENDIAN
++typedef struct   { BYTE L, H;} WBYTE;
++typedef struct   { BYTE D0:1, D1:1, D2:1, D3:1, D4:1, D5:1, D6:1, D7:1;
++                   BYTE D8:1, D9:1, DA:1, DB:1, DC:1, DD:1, DE:1, DF:1;} WBIT;
++typedef struct   { BYTE LL, LH, HL, HH;} DWBYTE;
++typedef struct   { WORD LLLH, HLHH;}     DWWORD;
++
++#else
++typedef struct   { BYTE H, L;} WBYTE;
++typedef struct   {
++                    BYTE D8:1, D9:1, DA:1, DB:1, DC:1, DD:1, DE:1, DF:1;
++                    BYTE D0:1, D1:1, D2:1, D3:1, D4:1, D5:1, D6:1, D7:1;
++                  } WBIT;
++
++typedef struct   { BYTE HH, HL, LH, LL;} DWBYTE;
++typedef struct   { WORD HLHH, LLLH;}     DWWORD;
++#endif
++
++
++typedef union                           /* typedef TBitWord */
++{
++  WORD   mWORD;
++  WBYTE  mBYTE;
++} TBitWord;
++
++typedef union                           /* typedef TBitByte */
++{ BYTE  mBYTE;
++  BBIT  mBIT ;
++} TBitByte;
++
++typedef union                           /* typedef TBitWord */
++{
++  DWORD  mdWORD;
++  DWBYTE mBYTE;
++  DWWORD mWORD;
++  TBitWord mTBW[2];
++} TBitDWord;
++
++
++typedef double                Flo64;    // Double precision floating point
++typedef double              * pFlo64;
++typedef float                 Flo32;    // Single precision floating point
++typedef float               * pFlo32;
++typedef signed   long long    Int64S;   // Signed   64 bit quantity
++typedef signed   long long  * pInt64S;
++typedef unsigned long long    Int64U;   // Unsigned 64 bit quantity
++typedef unsigned long long  * pInt64U;
++typedef signed   int          Int32S;   // Signed   32 bit quantity
++typedef signed   int        * pInt32S;
++typedef unsigned int          Int32U;   // Unsigned 32 bit quantity
++typedef unsigned int        * pInt32U;
++typedef signed   short        Int16S;   // Signed   16 bit quantity
++typedef signed   short      * pInt16S;
++typedef unsigned short        Int16U;   // Unsigned 16 bit quantity
++typedef unsigned short      * pInt16U;
++typedef signed   char         Int8S;    // Signed    8 bit quantity
++typedef signed   char       * pInt8S;
++typedef unsigned char         Int8U;    // Unsigned  8 bit quantity
++typedef unsigned char       * pInt8U;
++typedef unsigned int          Boolean;  // Boolean
++typedef unsigned int        * pBoolean;
++
++#define MAX(a, b) (((a) > (b)) ? (a) : (b))
++#define MIN(a, b) (((a) < (b)) ? (a) : (b))
++
++
++/*********************************************************************************/
++/*                            PUBLIC CONST                                       */
++/*********************************************************************************/
++/*********************************************************************************/
++/*                            PUBLIC VARIABLE                                    */
++/*********************************************************************************/
++/*********************************************************************************/
++/*                            PUBLIC FUNCTION                                    */
++/*********************************************************************************/
++
++/*###############################################################################*/
++
++
++#endif       /* __TYPEDEFS_H */
++
+diff --git a/drivers/dmg/ACQManager/spi_interface.c b/drivers/dmg/ACQManager/spi_interface.c
+new file mode 100644
+index 0000000..5dc4674
+--- /dev/null
++++ b/drivers/dmg/ACQManager/spi_interface.c
+@@ -0,0 +1,230 @@
++/*********************************************************************************/
++/*!  \file  spi_interface.c
++   \brief
++
++   Modulo per la gestione spi a livello kernel
++
++   \author  Andrea Gai
++   \date    2017_10_16
++ */
++/*********************************************************************************/
++
++/*********************************************************************************/
++/*                            INCLUDE                                            */
++/*********************************************************************************/
++#include <linux/string.h>
++
++#include <linux/types.h>
++#include <linux/kernel.h>
++
++#include "TYPEDEFS.H"
++#include <linux/spi/spi.h>
++#include <linux/spi/ad7699.h>
++#include "spi_interface.h"
++/*###############################################################################*/
++/*###############################################################################*/
++/*###############################################################################*/
++/*                            DECLARATION                                        */
++/*###############################################################################*/
++
++extern int Bypass_ad7699_open(void);
++extern int Bypass_ad7699_init(struct spi_setting *spiSet);
++extern int Bypass_ad7699_message(struct spi_ioc_transfer *u_xfers, unsigned n_xfers);
++extern int Bypass_ad7699_close(void);
++
++/*********************************************************************************/
++/*                            DEFINE                                             */
++/*********************************************************************************/
++
++ #define MAX_LEN_BUFF          32
++ #define SPIMODE 0
++ #define BITS    8
++ #define SPEED   2000000
++// #define SPEED   20000
++ #define DELAY   0
++
++/*********************************************************************************/
++/*                            PRIVATE CONST                                      */
++/*********************************************************************************/
++/*********************************************************************************/
++/*                            PRIVATE VARIABLE                                   */
++/*********************************************************************************/
++
++/*********************************************************************************/
++/*                            PRIVATE FUNCTION                                   */
++/*********************************************************************************/
++static int spi_interface_init    (void);
++static int spi_interface_transfer(Int8U *pBuff, Int32U LenBuf, Int8U *pRxBuff);
++static int spi_interface_close   (void);
++/*********************************************************************************/
++/*                            PUBLIC VARIABLE                                    */
++/*********************************************************************************/
++
++/*###############################################################################*/
++/*###############################################################################*/
++/*###############################################################################*/
++/*                                    CODE                                       */
++/*###############################################################################*/
++
++/*********************************************************************************/
++/*                            PRIVATE FUNCTION CODE                              */
++/*********************************************************************************/
++/*********************************************************************************/
++/*! \fn    void bios_Uart0_Init ( BYTE format )
++   \brief Inizializza Porta
++
++   Routine che gestisce l'inizializzazione della UART0 compilata su PC
++   che simula M16.
++   \param     format indica il formato e il baudeRate (vd enum FORMAT_COM)
++   \return    valore restituito
++ */
++/*********************************************************************************/
++static int spi_interface_init(void)
++{
++        int iierr;
++        struct spi_setting spiSetting = {
++                .max_speed_hz     =    SPEED,
++                .bits_per_word    =    BITS,
++                .lsbF             =    1,
++                .mode             =    SPI_MODE_0,
++        };
++
++
++        iierr = Bypass_ad7699_open();
++        if( iierr < 0)
++        {
++                printk(KERN_INFO "@@@ function : %s line : %d FAILED!!! \n",__FUNCTION__, __LINE__);
++                return -1;
++        }
++        iierr = Bypass_ad7699_init(&spiSetting);
++        if( iierr < 0)
++        {
++                printk(KERN_INFO "@@@ function : %s line : %d FAILED!!! \n",__FUNCTION__, __LINE__);
++                iierr = Bypass_ad7699_close();
++                return -2;
++        }
++
++        return (1);
++}
++
++
++/*********************************************************************************/
++/*! \fn    int Acq_Storage_GetData(int id , WORD *Outbuf)
++   \brief Get dati
++
++   Routine che preleva CB_BUFLEN bytes dalla coda del buffer
++   \return   -1 se la coda e' vuota, altrimenti il numero di byte copiati sul
++           buffer passato come parametro
++ */
++/*********************************************************************************/
++static int spi_interface_transfer( Int8U *pTxBuff, Int32U LenBuf, Int8U *pRxBuff)
++{
++        int iierr;
++
++        struct spi_ioc_transfer tr = {
++                .tx_buf = (unsigned long)pTxBuff,
++                .rx_buf = (unsigned long)pRxBuff,
++                .len = LenBuf,
++                .delay_usecs = DELAY,
++                .speed_hz = SPEED,
++                .bits_per_word = BITS,
++                .cs_change = 1,
++        };
++
++        // Si trasferisce una struttura alla volta
++        iierr = Bypass_ad7699_message( &tr, 1);
++
++        if (iierr < 0)
++        {
++                printk(KERN_ERR "----------------Can't transfer spi message\n");
++        }
++        return iierr;
++}
++
++/*********************************************************************************/
++/*! \fn    int Acq_Storage_GetData(int id , WORD *Outbuf)
++   \brief Get dati
++
++   Routine che preleva CB_BUFLEN bytes dalla coda del buffer
++   \return   -1 se la coda e' vuota, altrimenti il numero di byte copiati sul
++           buffer passato come parametro
++ */
++/*********************************************************************************/
++static int spi_interface_close (void)
++{
++
++        return (Bypass_ad7699_close());
++}
++
++/*********************************************************************************/
++/*                            PUBLIC FUNCTION  CODE                              */
++/*********************************************************************************/
++/*********************************************************************************/
++/*! \fn    int Spi_Init(void)
++   \brief    inizializzazione SPI device
++
++   Routine inizializzazione Spi device
++   \return   1 inizializzato
++          -1 Non inizializzato
++ */
++/*********************************************************************************/
++int Spi_Init()
++{
++        return(spi_interface_init());
++}
++
++
++/*********************************************************************************/
++/*! \fn    int Spi_Close(void)
++   \brief    smonta SPI device
++
++   Routine smonta Spi device
++   \return   1 smonatato
++          -1 Non smontato
++ */
++/*********************************************************************************/
++int Spi_Close()
++{
++        return (spi_interface_close());
++}
++
++/*********************************************************************************/
++/*! \fn    int Spi_TxBuff(Int8U *pBuff, Int32U LenBuf)
++   \brief    smonta SPI device
++
++   Routine smonta Spi device
++   \return   1 smonatato
++          -1 Non smontato
++ */
++/*********************************************************************************/
++int Spi_TxBuff(Int8U *pBuff, Int32U LenBuf)
++{
++        int ret;
++        Int8U rx[MAX_LEN_BUFF];
++        ret = spi_interface_transfer( pBuff, LenBuf, rx);
++        if (ret == 1)
++        {
++                printk(KERN_ERR "-----------------------------can't send spi message\n");
++        }
++        return ret;
++}
++
++/*********************************************************************************/
++/*! \fn    int Spi_TxBuff(Int8U *pBuff, Int32U LenBuf)
++   \brief    smonta SPI device
++
++   Routine smonta Spi device
++   \return   1 smonatato
++          -1 Non smontato
++ */
++/*********************************************************************************/
++int Spi_RxBuff(Int8U *pBuff, Int32U LenBuf, Int8U *pRxBuff)
++{
++        int ret;
++        ret = spi_interface_transfer(pBuff, LenBuf, pRxBuff);
++        if (ret == 1)
++        {
++                printk(KERN_ERR "-----------------------------can't read spi message\n");
++        }
++        return ret;
++}
+diff --git a/drivers/dmg/ACQManager/spi_interface.h b/drivers/dmg/ACQManager/spi_interface.h
+new file mode 100644
+index 0000000..32ebbfb
+--- /dev/null
++++ b/drivers/dmg/ACQManager/spi_interface.h
+@@ -0,0 +1,27 @@
++/*********************************************************************************/
++/*!  \file  spi_interface.h
++     \brief Header spi_interface.c
++
++File intestazione di spi_interface.h per la gestione Spi device
++
++    \author  Andrea Gai
++    \date    2017_10_16
++ */
++/*********************************************************************************/
++
++
++#ifndef _SPI_INTERFACE_H
++#define _SPI_INTERFACE_H 1
++
++#include "TYPEDEFS.H"
++/*
++*********************************************************************************************************
++*                                            FUNCTION PROTOTYPES
++*********************************************************************************************************
++*/
++int Spi_Init(void);
++int Spi_Close(void);
++int Spi_TxBuff( Int8U *pBuff, Int32U LenBuf);
++int Spi_RxBuff( Int8U *pBuff, Int32U LenBuf, Int8U *pRxBuff);
++
++#endif // _SPI_INTERFACE_H
+diff --git a/drivers/dmg/AliveSignal/DEF_COMP.h b/drivers/dmg/AliveSignal/DEF_COMP.h
+new file mode 100644
+index 0000000..b5f8f8e
+--- /dev/null
++++ b/drivers/dmg/AliveSignal/DEF_COMP.h
+@@ -0,0 +1,53 @@
++/*********************************************************************************/
++/*!  \file  DEF_COMP.h
++     \brief Define di compilazione
++
++File include contenente tutti i settaggi di compilazione
++*/
++/*********************************************************************************/
++
++#ifndef __DEF_COMP_H
++#define __DEF_COMP_H  1
++
++
++/*###############################################################################*/
++/*********************************************************************************/
++/*                            INCLUDE                                            */
++/*********************************************************************************/
++/*********************************************************************************/
++/*                            DEFINE                                             */
++/*********************************************************************************/
++#define PC            	0  //!< Definire 1 se si vuole compilare su PC
++                           //!<
++
++#define DEBUG_CONFIGURATION 0 //!< Definire 1 se si vuole compilare in modalita' Debug
++                              //!<
++#define LOG_ON        	0  //!< Definire 1 se si vuole attivare le funzioni
++                           //!< di scrittura del modulo log
++#define VISUAL_ERR    	0  //!< Definire 1 se si vuole attivare le stringhe di errore
++                           //!<
++#define TEST_PROP_FILE  0  //!< Definire 1 se si vuole attivare le funzioni
++                           //!< di test del file di property
++
++#define GCF_LITTLE_ENDIAN 0 // Big_Endian = 0 Little_Endian = 1
++
++
++
++/*********************************************************************************/
++/*                            TYPES                                              */
++/*********************************************************************************/
++/*********************************************************************************/
++/*                            PUBLIC CONST                                       */
++/*********************************************************************************/
++/*********************************************************************************/
++/*                            PUBLIC VARIABLE                                    */
++/*********************************************************************************/
++/*********************************************************************************/
++/*                            PUBLIC FUNCTION                                    */
++/*********************************************************************************/
++
++/*###############################################################################*/
++
++
++
++#endif      // __DEF_COMP_H
+diff --git a/drivers/dmg/AliveSignal/Kconfig b/drivers/dmg/AliveSignal/Kconfig
+new file mode 100644
+index 0000000..be54d26
+--- /dev/null
++++ b/drivers/dmg/AliveSignal/Kconfig
+@@ -0,0 +1,9 @@
++#
++# Pografo Alive Signal
++#
++
++config ALIVE_SIGNAL_DRIVER
++	tristate "Pantografo Alive Signal device support"
++	default y
++	---help---
++	  Pantografo Alive Signal Manager.
+diff --git a/drivers/dmg/AliveSignal/Makefile b/drivers/dmg/AliveSignal/Makefile
+new file mode 100644
+index 0000000..f21c984
+--- /dev/null
++++ b/drivers/dmg/AliveSignal/Makefile
+@@ -0,0 +1,2 @@
++
++obj-$(CONFIG_ALIVE_SIGNAL_DRIVER)	+= SqwManager.o 
+diff --git a/drivers/dmg/AliveSignal/SqwManager.c b/drivers/dmg/AliveSignal/SqwManager.c
+new file mode 100644
+index 0000000..d203358
+--- /dev/null
++++ b/drivers/dmg/AliveSignal/SqwManager.c
+@@ -0,0 +1,744 @@
++/*********************************************************************************/
++/*********************************************************************************/
++/*                            INCLUDE                                            */
++/*********************************************************************************/
++
++#include <linux/module.h>
++#include <linux/kobject.h>
++#include <linux/sysfs.h>
++#include <linux/init.h>
++#include <linux/fs.h>
++#include <linux/string.h>
++
++#include <linux/types.h>
++#include <linux/kernel.h>
++#include <linux/clk.h>
++#include <linux/io.h>
++#include <linux/uaccess.h>
++
++/***********************************************************/
++#include <linux/kthread.h>  // for threads
++#include <linux/time.h>   // for using jiffies
++#include <linux/timer.h>
++#include <linux/delay.h>
++/***********************************************************/
++#include <linux/mutex.h>
++#include <linux/device.h>
++#include <linux/unistd.h>
++
++
++#include <linux/gpio.h>
++#include <linux/io.h>
++#include <linux/of.h>
++#include <linux/of_address.h>
++#include <linux/of_gpio.h>
++
++#include "DEF_COMP.h"
++#include "TYPEDEFS.H"
++
++/*###############################################################################*/
++/*###############################################################################*/
++/*                            DECLARATION                                        */
++/*###############################################################################*/
++
++#define INTERRUPT_MODE 1
++
++#if INTERRUPT_MODE
++  #define RUNNER_MODE 0
++#else
++  #define RUNNER_MODE 1
++#endif
++/*********************************************************************************/
++/*                            DEFINE                                             */
++/*********************************************************************************/
++#define UNSEC_IN_SEC  1L
++#define UNSEC_IN_MSEC 1000L
++#define UNSEC_IN_USEC 1000000L
++#define UNSEC_IN_NSEC 1000000000L
++
++#define UNMSEC_IN_NSEC 1000000L
++#define UNUSEC_IN_NSEC 1000L
++
++#define UNMIN_IN_SEC  60L
++#define UNHOUR_IN_SEC 3600L
++
++#define CENTOMSEC_IN_MSEC 100L
++
++#define MAX_FREQUENCY_HZ 10000L
++#define DEFAULT_FREQUENCY_LOOP_HZ 1000L
++#define MIN_FREQUENCY_HZ 1L
++
++#define MAX_WATCH_DOG_SEC 3600L
++#define MIN_WATCH_DOG_SEC 1L
++
++#define WATCHDOG_RESET_VALUE 2
++
++#define SEMI_PERIOD_FACTOR 2
++
++
++//GPIO direction register
++#define GPIO5_DIRR 0X020AC004
++//GPIO data register
++#define GPIO5_DATA 0X020AC000
++//0x00004000
++#define GPIO5_PIN15 (1<<15)
++
++/*********************************************************************************/
++/*                            PRIVATE CONST                                      */
++/*********************************************************************************/
++typedef enum RESOLUTION {
++        SECOND=0,
++        MILLI,
++        MICRO,
++        NANO,
++        ERROR,
++        N_RES
++}enum_res;
++
++
++/*********************************************************************************/
++/*                            PRIVATE VARIABLE                                   */
++/*********************************************************************************/
++
++/**************************************************************/
++static struct task_struct *thread1;
++static DEFINE_MUTEX(mutex_module);
++
++
++static DEFINE_MUTEX(thread_OFFlock);
++#if RUNNER_MODE
++static unsigned char muc_ThreadActive = 0;
++#endif
++
++static struct kobject *dmg_kobject;
++
++static unsigned char muc_processActive = 0;
++static DEFINE_MUTEX(processOnlock);
++
++static DEFINE_MUTEX(muc_watchdog);
++
++static bool mbVerbose = false;
++
++static unsigned long mul_SQWAVE_Freq = MAX_FREQUENCY_HZ;
++
++
++//static unsigned long ul_period_in_nano=(UNSEC_IN_NSEC / DEFAULT_FREQUENCY_LOOP_HZ);
++
++#if INTERRUPT_MODE
++static unsigned long mReset_SQW_Storage = 0L;
++
++static unsigned long mReset_SQW = ((unsigned long )(1000 * UNMSEC_IN_NSEC ) / ((unsigned long ) (UNSEC_IN_NSEC) /(unsigned long ) (DEFAULT_FREQUENCY_LOOP_HZ )));
++#endif
++
++// static unsigned long ul_semi_period_in_milli = ((UNSEC_IN_MSEC / DEFAULT_FREQUENCY_LOOP_HZ) / SEMI_PERIOD_FACTOR );
++// static unsigned long ul_semi_period_in_micro = ((UNSEC_IN_USEC / DEFAULT_FREQUENCY_LOOP_HZ) / SEMI_PERIOD_FACTOR );
++static unsigned long ul_semi_period_in_nano  = ((UNSEC_IN_NSEC / DEFAULT_FREQUENCY_LOOP_HZ) / SEMI_PERIOD_FACTOR );
++
++static unsigned int mui_watchdog_cnt = WATCHDOG_RESET_VALUE;
++static unsigned long ul_watchdog_resetvalue = (unsigned long )(WATCHDOG_RESET_VALUE)*(unsigned long )(SEMI_PERIOD_FACTOR) *MAX_FREQUENCY_HZ;
++static unsigned long ul_watchdog_countdown=0;
++
++static bool mb_watchdog_reset_falg = true;
++
++// static enum_res meu_resolution;
++
++#if INTERRUPT_MODE
++static struct hrtimer hr_timer;
++//static int value = 0;
++static ktime_t ktime;
++
++static int mflag=0;
++
++static DECLARE_WAIT_QUEUE_HEAD(tick_event);
++#endif
++
++/**************************************************************/
++
++/*********************************************************************************/
++/*                            PRIVATE FUNCTION                                   */
++/*********************************************************************************/
++static unsigned char isProcessON (void);
++static unsigned char SetProcessONOFF (unsigned char invalue);
++
++static int thread_fn( void * empty);
++static int thread_init (void);
++static void thread_cleanup(void);
++
++static ssize_t ApplyConfiguration(void);
++
++//static ssize_t show_axis_T(struct kobject *kobj, struct kobj_attribute *attr, char *buf);
++static ssize_t getConfiguration(struct kobject *kobj, struct kobj_attribute *attr, char *buf);
++static ssize_t setConfiguration(struct kobject *kobj, struct kobj_attribute *attr, const char *buf, size_t count);
++
++static ssize_t setVerbose(struct kobject *kobj, struct kobj_attribute *attr, const char *buf, size_t count);
++
++static ssize_t turnOnOFF(struct kobject *kobj, struct kobj_attribute *attr, const char *buf, size_t count);
++static ssize_t getState(struct kobject *kobj, struct kobj_attribute *attr, char *buf);
++
++static ssize_t getHelpConfig(struct kobject *kobj, struct kobj_attribute *attr, char *buf);
++static ssize_t keepalive(struct kobject *kobj, struct kobj_attribute *attr, const char *buf, size_t count);
++
++static int __init mymodule_init (void);
++static void __exit mymodule_exit (void);
++
++#if INTERRUPT_MODE
++enum hrtimer_restart SQWM_hrtimer_callback( struct hrtimer *timer );
++#endif
++/*********************************************************************************/
++/*                            PUBLIC FUNCTION                                    */
++/*********************************************************************************/
++
++/*********************************************************************************/
++/*                            PUBLIC VARIABLE                                    */
++/*********************************************************************************/
++/*###############################################################################*/
++
++static int gpioinit = 0;
++static void __iomem *gpio_base;
++static void debug_gpio_init (void)
++{
++        unsigned long ul_gio_base_app;
++        if(gpioinit==0)
++        {
++                // set as OUTPUT
++                gpio_base = ioremap(GPIO5_DIRR, GPIO5_PIN15);
++                gpioinit++;
++                ul_gio_base_app= __raw_readl(gpio_base);
++                //  printk(KERN_INFO "%s\n",__FUNCTION__);
++
++                __raw_writel((ul_gio_base_app ^ GPIO5_PIN15), gpio_base);
++
++                // set Value
++                gpio_base = ioremap(GPIO5_DATA, GPIO5_PIN15);
++                gpioinit++;
++                ul_gio_base_app= __raw_readl(gpio_base);
++                // printk(KERN_INFO "%s\n",__FUNCTION__);
++
++                __raw_writel((ul_gio_base_app ^ GPIO5_PIN15), gpio_base);
++        }
++}
++
++static void debug_gpio (void)
++{
++        unsigned long ul_gio_base_app;
++        debug_gpio_init();
++        // printk(KERN_INFO "%s\n",__FUNCTION__);
++        ul_gio_base_app= __raw_readl(gpio_base);
++        __raw_writel((ul_gio_base_app ^ GPIO5_PIN15), gpio_base);
++}
++static void checkWatchDog (void)
++{
++        bool stateFlag=false;
++
++        // Read and reset WatchDog Flag
++        mutex_lock(&muc_watchdog);
++        stateFlag=mb_watchdog_reset_falg;
++        mb_watchdog_reset_falg=false;
++        mutex_unlock(&muc_watchdog);
++
++        if(stateFlag)
++        {
++                ul_watchdog_countdown = ul_watchdog_resetvalue;
++        }
++        else
++        {
++                if(ul_watchdog_countdown > 0 )
++                {
++                        ul_watchdog_countdown--;
++                }
++                else
++                {
++                        SetProcessONOFF(0);
++                }
++        }
++}
++
++#if RUNNER_MODE
++static unsigned char isThreadOn (void)
++{
++        unsigned char value;
++        mutex_lock(&thread_OFFlock);
++        value = muc_ThreadActive;
++        mutex_unlock(&thread_OFFlock);
++        if (value)
++        {
++                return(1);
++        }
++        return(0);
++}
++
++static unsigned char setThreadOff (void)
++{
++        mutex_lock(&thread_OFFlock);
++        muc_ThreadActive=0;
++        mutex_unlock(&thread_OFFlock);
++        return(1);
++}
++#endif
++
++
++static unsigned char isProcessON (void)
++{
++        unsigned char value;
++        mutex_lock(&processOnlock);
++        value = muc_processActive;
++        mutex_unlock(&processOnlock);
++
++        if (value)
++        {
++                return(1);
++        }
++        return(0);
++}
++
++static unsigned char  SetProcessONOFF (unsigned char invalue)
++{
++        unsigned char value=0;
++        if (invalue)
++        {
++                value=1;
++        }
++
++        mutex_lock(&processOnlock);
++        muc_processActive = value;
++        mutex_unlock(&processOnlock);
++
++        return (value);
++
++}
++
++#if INTERRUPT_MODE
++enum hrtimer_restart SQWM_hrtimer_callback( struct hrtimer *timer )
++{
++        /* Riabilita il timer */
++        hrtimer_start( &hr_timer, ktime, HRTIMER_MODE_REL );
++
++        /* Arma il thread */
++        mflag=1;
++        wake_up_interruptible(&tick_event);
++
++        return HRTIMER_NORESTART;
++}
++
++
++/* THREAD */
++static int thread_fn( void * empty)
++{
++
++        printk(KERN_INFO "DMG SQW: Thread enabled Hz= %lu \n", mul_SQWAVE_Freq);
++        mb_watchdog_reset_falg = true;
++        do
++        {
++                /* Aspetta a tempo indeterminato l'evento del timer */
++                wait_event_interruptible(tick_event,(mflag==1));
++                mflag=0;
++                /* Controlla se deve fermarsi */
++                if(kthread_should_stop())
++                {
++                        printk("receive_thread exited\n");
++                        return 0;
++                }
++
++                if( isProcessON())
++                {
++                        debug_gpio();
++                        checkWatchDog();
++                }
++                else
++                {
++
++                        if( mReset_SQW_Storage < 1 )
++                        {
++                                mReset_SQW_Storage = mReset_SQW;
++                                mb_watchdog_reset_falg = true;
++                                if (mbVerbose) printk(KERN_INFO "DMG SQW Manager: SQW Pause\n");
++                        }
++                        else
++                        {
++                                mReset_SQW_Storage--;
++                        }
++                }
++                /* Esce dalla sezione critica */
++                // up_write(&rwsem_lock);
++        }
++        while(!kthread_should_stop());
++
++        return 0;
++}
++#endif
++#if RUNNER_MODE
++static int thread_fn( void * empty)
++{
++        printk(KERN_INFO "DMG SQW: Thread enabled Hz= %lu \n", mul_SQWAVE_Freq);
++        mb_watchdog_reset_falg = true;
++        while (isThreadOn())
++        {
++                set_current_state(TASK_UNINTERRUPTIBLE);
++                if( isProcessON())
++                {
++                        checkWatchDog();
++                        debug_gpio();
++                        switch (meu_resolution)
++                        {
++                        case NANO:
++                                ndelay(ul_semi_period_in_nano);
++                                break;
++                        case MICRO:
++                                udelay(ul_semi_period_in_micro);
++                                break;
++                        case MILLI:
++                        default:
++                                mdelay(ul_semi_period_in_milli);
++                                break;
++                        }
++                }
++                else
++                {
++                        if (mbVerbose) printk(KERN_INFO "DMG SQW Manager: SQW Pause\n");
++                        mdelay(UNSEC_IN_MSEC);
++                        mb_watchdog_reset_falg = true;
++                }
++
++        }
++        if (mbVerbose) printk(KERN_INFO "DMG SQW Manager: Thread Close \n");
++        return 0;
++}
++#endif
++//###################################################################################################
++//###################################################################################################
++//###################################################################################################
++#if INTERRUPT_MODE
++static int thread_init (void)
++{
++
++        char our_thread[20]="DMG SQW Manager";
++        /* Inizializza il semaforo */
++        // init_rwsem(&rwsem_lock);
++
++        /* Inizializza l'evento per l'aggancio del thread */
++        mflag = 0;
++        init_waitqueue_head(&tick_event);
++
++        printk(KERN_INFO "DMG SQW Manager driver initialized.\n");
++
++        // /* Crea il Thread di lettura della SPI */
++        //ts=kthread_run(thread_fn,NULL,"SQWManager Thread");
++        thread1 = kthread_create(thread_fn,NULL,our_thread);
++        if((thread1))
++        {
++                wake_up_process(thread1);
++        }
++
++        //  ktime = ktime_set( 0, MS_TO_NS(delay_in_ms) );
++        //  ktime = ktime_set( 0, 100000 );    /* Valore del timer in nano secondi */
++
++        /* Setta la variabile timeout del timer */
++        ktime = ktime_set( 0, ul_semi_period_in_nano );
++
++        /* Inizializza l'high Resolution Timer */
++        hrtimer_init( &hr_timer, CLOCK_MONOTONIC, HRTIMER_MODE_REL );
++
++        /* Setta la funzione di callback del timer */
++        hr_timer.function = &SQWM_hrtimer_callback;
++
++        printk( "DMG Starting timer to fire in %ld us (%ld)\n", ul_semi_period_in_nano, jiffies );
++
++        /* Fa partire il timer */
++        hrtimer_start( &hr_timer, ktime, HRTIMER_MODE_REL );
++
++        return (0);
++
++//    printk(KERN_INFO "%s\n",__FUNCTION__);
++
++
++}
++#endif
++#if RUNNER_MODE
++static int thread_init (void)
++{
++        char our_thread[20]="DMG SQW Manager";
++        muc_ThreadActive=1;
++        thread1 = kthread_create(thread_fn,NULL,our_thread);
++        if((thread1))
++        {
++                wake_up_process(thread1);
++        }
++        return 0;
++}
++#endif
++
++
++#if RUNNER_MODE
++static void thread_cleanup(void)
++{
++        //   int ret=0;
++        setThreadOff();
++        mdelay(UNSEC_IN_MSEC);
++//    ret = kthread_stop(thread1);
++//    if(!ret)
++//    {
++        printk(KERN_INFO "DMG SQW Manager: Thread stopped. \n");
++//    }
++}
++#endif
++/****************************************************************/
++#if INTERRUPT_MODE
++static void thread_cleanup(void)
++{
++        int ret;
++
++/* Abilita lo stop del thread */
++        kthread_stop(thread1);
++/* Sblocca il thread per permettergli di fermarsi */
++        mflag = 1;
++        wake_up_interruptible(&tick_event);
++/* Ferma il timer */
++        ret = hrtimer_cancel( &hr_timer );
++        if (ret) printk("The timer was still in use...\n");
++        printk("HR Timer module uninstalling\n");
++};
++
++#endif
++static ssize_t ApplyConfiguration(void)
++{
++        //ul_period_in_nano = ((unsigned long ) (UNSEC_IN_NSEC)/(unsigned long )(mul_SQWAVE_Freq));
++        ul_semi_period_in_nano  = ( ((unsigned long ) (UNSEC_IN_NSEC)/(unsigned long )(mul_SQWAVE_Freq)) / SEMI_PERIOD_FACTOR );
++        //ul_semi_period_in_micro = ( ul_semi_period_in_nano / UNUSEC_IN_NSEC);
++        //ul_semi_period_in_milli = ( ul_semi_period_in_nano / UNMSEC_IN_NSEC);
++        ul_watchdog_resetvalue = (unsigned long )(mui_watchdog_cnt)*(unsigned long )(SEMI_PERIOD_FACTOR) *mul_SQWAVE_Freq;
++        mb_watchdog_reset_falg = true;
++
++        if (mbVerbose)
++        {
++                //  printk(KERN_NOTICE "@@@@@@@@@@@@@@@@ %s %d ul_period_in_nano       = %lu  \n", __FUNCTION__,__LINE__, ul_period_in_nano       );
++                printk(KERN_NOTICE "@@@@@@@@@@@@@@@@ %s %d ul_semi_period_in_nano  = %lu  \n", __FUNCTION__,__LINE__, ul_semi_period_in_nano  );
++                // printk(KERN_NOTICE "@@@@@@@@@@@@@@@@ %s %d ul_semi_period_in_micro = %lu  \n", __FUNCTION__,__LINE__, ul_semi_period_in_micro );
++                // printk(KERN_NOTICE "@@@@@@@@@@@@@@@@ %s %d ul_semi_period_in_milli = %lu  \n", __FUNCTION__,__LINE__, ul_semi_period_in_milli );
++                printk(KERN_NOTICE "@@@@@@@@@@@@@@@@ %s %d ul_watchdog_resetvalue  = %lu  \n", __FUNCTION__,__LINE__, ul_watchdog_resetvalue  );
++                printk(KERN_NOTICE "@@@@@@@@@@@@@@@@ %s %d mb_watchdog_reset_falg  = %d   \n", __FUNCTION__,__LINE__, mb_watchdog_reset_falg  );
++        }
++
++/*
++        if( ul_semi_period_in_milli > 9)
++        {
++                meu_resolution=MILLI;
++                if (mbVerbose) printk(KERN_NOTICE "@@@@@@@@@@@@@@@@ %s %d Select = MILLI \n", __FUNCTION__,__LINE__);
++        }
++        else if ( ul_semi_period_in_micro > 9)
++        {
++                meu_resolution=MICRO;
++                if (mbVerbose) printk(KERN_NOTICE "@@@@@@@@@@@@@@@@ %s %d Select = MICRO \n", __FUNCTION__,__LINE__);
++        }
++        else
++        {
++                meu_resolution=NANO;
++                if (mbVerbose) printk(KERN_NOTICE "@@@@@@@@@@@@@@@@ %s %d Select = NANO \n", __FUNCTION__,__LINE__);
++        }
++
++ */
++
++        hrtimer_cancel( &hr_timer );
++
++
++        /* Setta la variabile timeout del timer */
++        ktime = ktime_set( 0, ul_semi_period_in_nano );
++        /* Setta la funzione di callback del timer */
++        hr_timer.function = &SQWM_hrtimer_callback;
++        /* Fa partire il timer */
++        hrtimer_start( &hr_timer, ktime, HRTIMER_MODE_REL );
++
++
++        return(1);
++}
++
++static ssize_t getHelpConfig(struct kobject *kobj, struct kobj_attribute *attr, char *buf)
++{
++        return sprintf(buf, "[Sampling Frequency in HZ ; WatchDog Time in Second]  i.e  echo \"[1000;180]\" > configure\n");
++}
++
++static ssize_t getConfiguration(struct kobject *kobj, struct kobj_attribute *attr, char *buf)
++{
++        return sprintf(buf, "The frequency is: %lu hz WatchDog Time: %d sec \n", mul_SQWAVE_Freq, mui_watchdog_cnt);
++}
++
++static ssize_t setConfiguration(struct kobject *kobj, struct kobj_attribute *attr, const char *buf, size_t count)
++{
++        unsigned long ul_Frequency_Hz;
++        unsigned long ul_Time_WatchDog;
++
++        int iierr = 0;
++
++//    iierr = sscanf( buf, "[%lu;%lu;%lu]", &ulAXIS_Freq ,&ulTEMP_Freq,&ulSample);
++        iierr = sscanf( buf, "[%lu;%lu]", &ul_Frequency_Hz, &ul_Time_WatchDog);
++
++        if(isProcessON())
++        {
++                printk(KERN_NOTICE "@@@@@@@@@@@@@@@@ Setting Configuration Lock, Stop SQWManager before change the configuration \n");
++                return -EDEADLK;
++        }
++
++        if (iierr < 0)
++        {
++                printk(KERN_NOTICE "@@@@@@@@@@@@@@@@ Error in Frequency Setting range call");
++                return -EINVAL;
++        }
++
++        if(ul_Frequency_Hz < MIN_FREQUENCY_HZ ||  ul_Frequency_Hz > MAX_FREQUENCY_HZ )
++        {
++                iierr = -EINVAL;
++                printk(KERN_NOTICE "@@@@@@@@@@@@@@@@ Setting: Frequency invalid range! Accepted [ %lu : %lu ] recive %lu\n", MIN_FREQUENCY_HZ,MAX_FREQUENCY_HZ,ul_Frequency_Hz);
++                return iierr;
++        }
++        mul_SQWAVE_Freq = (unsigned long)(ul_Frequency_Hz & 0XFFFFFF);
++        if (mbVerbose) printk(KERN_NOTICE "@@@@@@@@@@@@@@@@ Frequency New Value = %lu request = %lu\n", mul_SQWAVE_Freq, ul_Frequency_Hz );
++
++        if(ul_Time_WatchDog < MIN_WATCH_DOG_SEC ||  ul_Time_WatchDog > MAX_WATCH_DOG_SEC )
++        {
++                iierr = -EINVAL;
++                printk(KERN_NOTICE "@@@@@@@@@@@@@@@@ Setting: WatchDog invalid range! Accepted [ %lu : %lu ] recive %lu\n", MIN_WATCH_DOG_SEC,MAX_WATCH_DOG_SEC,ul_Time_WatchDog);
++                return iierr;
++        }
++        mui_watchdog_cnt = (unsigned long)(ul_Time_WatchDog & 0XFFFFFF);
++        if (mbVerbose) printk(KERN_NOTICE "@@@@@@@@@@@@@@@@ WatchDog New Value = %u request = %lu\n", mui_watchdog_cnt, ul_Time_WatchDog );
++
++        ApplyConfiguration();
++
++        return count;
++
++}
++
++static ssize_t getState(struct kobject *kobj, struct kobj_attribute *attr, char *buf)
++{
++        int ret = -EINVAL;
++        unsigned char ucValue;
++
++        ucValue=isProcessON();
++
++        if( ucValue )
++        {
++                ret = sprintf(buf,"SQW Process is ON Value =%d\n", ucValue);
++        }
++        else
++        {
++                ret = sprintf(buf,"SQW Process is OFF Value =%d\n", ucValue);
++        }
++        return ret;
++}
++
++
++static ssize_t turnOnOFF(struct kobject *kobj, struct kobj_attribute *attr, const char *buf, size_t count)
++{
++        unsigned long val;
++
++        if (kstrtoul(buf, 10, &val))
++        {
++                if (mbVerbose) printk(KERN_NOTICE "@@@@@@@@@@@@@@@@ %s line %d  error 0001\n", __FUNCTION__, __LINE__ );
++                return -EINVAL;
++        }
++
++        if (val == 1)
++        {
++                SetProcessONOFF(1);
++                if (mbVerbose) printk(KERN_NOTICE "@@@@@@@@@@@@@@@@ %s line %d  SetProcessONOFF(1)\n", __FUNCTION__, __LINE__ );
++        }
++        else if (val == 0)
++        {
++                SetProcessONOFF(0);
++                if (mbVerbose) printk(KERN_NOTICE "@@@@@@@@@@@@@@@@ %s line %d  SetProcessONOFF(0)\n", __FUNCTION__, __LINE__ );
++        }
++        else
++        {
++                if (mbVerbose) printk(KERN_NOTICE "@@@@@@@@@@@@@@@@ %s line %d  error 0002\n", __FUNCTION__, __LINE__ );
++                return -ERANGE;
++        }
++        return (count);
++}
++
++static ssize_t setVerbose(struct kobject *kobj, struct kobj_attribute *attr, const char *buf, size_t count)
++{
++        unsigned long val;
++
++        if (kstrtoul(buf, 10, &val))
++        {
++                return -EINVAL;
++        }
++
++        mbVerbose = false;
++        if(val)
++        {
++                mbVerbose = true;
++        }
++
++        return count;
++}
++
++static ssize_t keepalive(struct kobject *kobj, struct kobj_attribute *attr, const char *buf, size_t count)
++{
++        mutex_lock(&muc_watchdog);
++        mb_watchdog_reset_falg = true;
++        mutex_unlock(&muc_watchdog);
++        return count;
++}
++
++
++static struct kobj_attribute kobj_attr_config      =__ATTR(configure, S_IRUGO | S_IWUSR, getConfiguration, setConfiguration );
++static struct kobj_attribute kobj_attr_state       =__ATTR(state, S_IRUGO | S_IWUSR, getState, turnOnOFF        );
++static struct kobj_attribute kobj_attr_verbose     =__ATTR(verbose,           S_IWUSR, NULL, setVerbose       );
++static struct kobj_attribute kobj_attr_keepalive   =__ATTR(keepalive,           S_IWUSR, NULL, keepalive        );
++static struct kobj_attribute kobj_attr_helpconfig  =__ATTR(helpconfig, S_IRUGO, getHelpConfig, NULL             );
++
++static struct attribute *mid_att_als[] = {
++        &kobj_attr_config.attr,
++        &kobj_attr_state.attr,
++        &kobj_attr_verbose.attr,
++        &kobj_attr_keepalive.attr,
++        &kobj_attr_helpconfig.attr,
++        NULL
++};
++
++static struct attribute_group m_als_gr = {
++        .name = "dmgsqwmanager",
++        .attrs = mid_att_als
++};
++
++static int __init mymodule_init (void)
++{
++        int error = 0;
++
++//    pr_debug("Module initialized successfully \n");
++
++        printk(KERN_INFO "DMG SQW Manager driver enable : %s\n",__FUNCTION__);
++
++        mutex_init(&mutex_module);
++
++        dmg_kobject = kobject_create_and_add("dmgSQW", kernel_kobj);
++        if(!dmg_kobject)
++        {
++                printk(KERN_INFO "DMG SQW Manager : %s Function error 0001 \n",__FUNCTION__);
++                return -ENOMEM;
++        }
++
++        error = sysfs_create_group(dmg_kobject, &m_als_gr);
++        if (error)
++        {
++                sysfs_remove_group(dmg_kobject,&m_als_gr);
++                printk(KERN_INFO "DMG SQW Manager : %s Function error 0002 \n",__FUNCTION__);
++                return -ENODEV;
++        }
++        error=thread_init();
++
++        printk(KERN_INFO "DMG SQW Manager driver initialized.\n");
++        return error;
++}
++
++static void __exit mymodule_exit (void)
++{
++        printk(KERN_INFO "DMG SQW Manager driver exit.\n");
++        thread_cleanup();
++        kobject_put(dmg_kobject);
++}
++
++module_init(mymodule_init);
++module_exit(mymodule_exit);
++MODULE_LICENSE("GPL");
++MODULE_AUTHOR("Gai Ing. Andrea");
+diff --git a/drivers/dmg/AliveSignal/TYPEDEFS.H b/drivers/dmg/AliveSignal/TYPEDEFS.H
+new file mode 100644
+index 0000000..cc9fd1c
+--- /dev/null
++++ b/drivers/dmg/AliveSignal/TYPEDEFS.H
+@@ -0,0 +1,128 @@
++/*********************************************************************************/
++/*!  \file  TYPEDEFS.h
++     \brief Definizione tipi
++
++File include delle difinizione di tipi.
++    \author  Francesca Biagioni
++    \date    17_Dic_2009 
++*/
++/*********************************************************************************/
++
++#ifndef __TYPEDEFS_H
++#define __TYPEDEFS_H
++
++
++/*###############################################################################*/
++/*********************************************************************************/
++/*                            INCLUDE                                            */
++/*********************************************************************************/
++/*********************************************************************************/
++/*                            DEFINE                                             */
++/*********************************************************************************/
++#ifndef NULL
++#define NULL            (void *)0
++#endif
++
++#define FALSE           0
++#define TRUE            1
++
++#define VOID            void
++
++#define LOBYTE(w)       ( (BYTE) (w) )
++#define HIBYTE(w)       ( (BYTE) ( (UINT) (w)>>8 ))
++#define LOWORD(l)       ( (WORD) (l) )
++#define HIWORD(l)       ( (WORD) ( (DWORD) (l)>>16 ))
++#define MAKELONG(lo,hi) ((LONG)(((WORD)(lo))|(((DWORD)((WORD)(hi)))<<16)))
++#define MAKEWORD(lo,hi) ((WORD)(((BYTE)(lo))|(((WORD)((BYTE)(hi)))<<8)))
++
++#define FARPOINTER
++
++/*********************************************************************************/
++/*                            TYPES                                              */
++/*********************************************************************************/
++typedef unsigned char   C;
++typedef unsigned short  US;
++typedef unsigned int    UI;
++typedef unsigned long   UL;
++typedef double          D;
++typedef unsigned char   BYTE;
++typedef unsigned char   UCHAR;
++
++typedef unsigned short  WORD; 
++
++typedef unsigned short  USHORT;
++
++typedef unsigned char   BOOL;
++
++typedef unsigned int    UINT;
++
++typedef signed   long   LONG;
++typedef unsigned long   ULONG;
++typedef int long   DWORD;
++
++typedef          char*  PSTR;
++typedef const    char*  PCSTR;
++typedef          BYTE*  PBYTE;
++typedef          int*   PINT;
++typedef          WORD*  PWORD;
++typedef          long*  PLONG;
++typedef          DWORD* PDWORD;
++
++typedef const    char   CSTR;
++typedef struct   { BYTE D0:1, D1:1, D2:1, D3:1, D4:1, D5:1, D6:1, D7:1;} BBIT;
++
++
++
++//#if LILLTLE_ENDIAN
++typedef struct   { BYTE L, H;} WBYTE;
++typedef struct   { BYTE D0:1, D1:1, D2:1, D3:1, D4:1, D5:1, D6:1, D7:1;
++                   BYTE D8:1, D9:1, DA:1, DB:1, DC:1, DD:1, DE:1, DF:1;} WBIT;
++typedef struct   { BYTE LL, LH, HL, HH;} DWBYTE;
++typedef struct   { WORD LLLH, HLHH;}     DWWORD;
++
++//#else
++//typedef struct   { BYTE H, L;} WBYTE;
++//typedef struct   {
++//					BYTE D8:1, D9:1, DA:1, DB:1, DC:1, DD:1, DE:1, DF:1;
++//					BYTE D0:1, D1:1, D2:1, D3:1, D4:1, D5:1, D6:1, D7:1;
++//                   } WBIT;
++//
++//typedef struct   { BYTE HH, HL, LH, LL;} DWBYTE;
++//typedef struct   { WORD HLHH, LLLH;}     DWWORD;
++//#endif
++
++
++typedef union                           /* typedef TBitWord */
++{
++  WORD   mWORD;
++  WBYTE  mBYTE;
++} TBitWord;
++
++typedef union                           /* typedef TBitByte */
++{ BYTE  mBYTE;
++  BBIT  mBIT ;
++} TBitByte;
++
++typedef union                           /* typedef TBitWord */
++{
++  DWORD  mdWORD;
++  DWBYTE mBYTE;
++  DWWORD mWORD;
++  TBitWord mTBW[2];
++} TBitDWord;
++
++/*********************************************************************************/
++/*                            PUBLIC CONST                                       */
++/*********************************************************************************/
++/*********************************************************************************/
++/*                            PUBLIC VARIABLE                                    */
++/*********************************************************************************/
++/*********************************************************************************/
++/*                            PUBLIC FUNCTION                                    */
++/*********************************************************************************/
++
++/*###############################################################################*/
++
++
++#endif       /* __TYPEDEFS_H */
++
+diff --git a/drivers/dmg/Kconfig b/drivers/dmg/Kconfig
+new file mode 100644
+index 0000000..66eaf52
+--- /dev/null
++++ b/drivers/dmg/Kconfig
+@@ -0,0 +1,21 @@
++#
++# Panto Driver
++#
++#
++# Pantografo Driver subsystem configuration
++#
++
++menuconfig PANTODRIVER
++	tristate "Pantografo card support"
++	default y
++	help
++	  Pantografo driver.
++
++
++if PANTODRIVER
++
++    source "drivers/dmg/ACQManager/Kconfig"
++
++    source "drivers/dmg/AliveSignal/Kconfig"
++
++endif # PANTODRIVER
+diff --git a/drivers/dmg/Makefile b/drivers/dmg/Makefile
+new file mode 100644
+index 0000000..b5e6d92
+--- /dev/null
++++ b/drivers/dmg/Makefile
+@@ -0,0 +1,7 @@
++#
++# Makefile for the kernel Pantografo device drivers.
++#
++
++
++obj-$(CONFIG_PANTODRIVER)		+= ACQManager/
++obj-$(CONFIG_PANTODRIVER)		+= AliveSignal/
+diff --git a/drivers/spi/Kconfig b/drivers/spi/Kconfig
+index 72b0590..4510dcc 100644
+--- a/drivers/spi/Kconfig
++++ b/drivers/spi/Kconfig
+@@ -652,6 +652,12 @@ config SPI_SPIDEV
+ 	  Note that this application programming interface is EXPERIMENTAL
+ 	  and hence SUBJECT TO CHANGE WITHOUT NOTICE while it stabilizes.
+ 
++config SPI_AD7699
++		tristate "User mode AD7699 SPI device driver support"
++		help
++		  This supports user mode AD7699 SPI protocol drivers.
++
++
+ config SPI_TLE62X0
+ 	tristate "Infineon TLE62X0 (for power switching)"
+ 	depends on SYSFS
+diff --git a/drivers/spi/Makefile b/drivers/spi/Makefile
+index d8cbf65..14683e5 100644
+--- a/drivers/spi/Makefile
++++ b/drivers/spi/Makefile
+@@ -8,6 +8,7 @@ ccflags-$(CONFIG_SPI_DEBUG) := -DDEBUG
+ # config declarations into driver model code
+ obj-$(CONFIG_SPI_MASTER)		+= spi.o
+ obj-$(CONFIG_SPI_SPIDEV)		+= spidev.o
++obj-$(CONFIG_SPI_AD7699)		+= spiadc.o
+ 
+ # SPI master controller drivers (bus)
+ obj-$(CONFIG_SPI_ALTERA)		+= spi-altera.o
+diff --git a/drivers/spi/spiadc.c b/drivers/spi/spiadc.c
+new file mode 100644
+index 0000000..d874b85
+--- /dev/null
++++ b/drivers/spi/spiadc.c
+@@ -0,0 +1,883 @@
++/*
++ * Simple synchronous userspace interface to SPI devices
++ *
++ * Copyright (C) 2006 SWAPP
++ *	Andrea Paterniani <a.paterniani@swapp-eng.it>
++ * Copyright (C) 2007 David Brownell (simplification, cleanup)
++ *
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation; either version 2 of the License, or
++ * (at your option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program; if not, write to the Free Software
++ * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
++ */
++
++#include <linux/init.h>
++#include <linux/module.h>
++#include <linux/ioctl.h>
++#include <linux/fs.h>
++#include <linux/device.h>
++#include <linux/err.h>
++#include <linux/list.h>
++#include <linux/errno.h>
++#include <linux/mutex.h>
++#include <linux/slab.h>
++#include <linux/compat.h>
++#include <linux/of.h>
++#include <linux/of_device.h>
++
++#include <linux/spi/spi.h>
++#include <linux/spi/ad7699.h>
++
++#include <asm/uaccess.h>
++
++
++/*
++ * This supports access to SPI devices using normal userspace I/O calls.
++ * Note that while traditional UNIX/POSIX I/O semantics are half duplex,
++ * and often mask message boundaries, full SPI support requires full duplex
++ * transfers.  There are several kinds of internal message boundaries to
++ * handle chipselect management and other protocol options.
++ *
++ * SPI has a character major number assigned.  We allocate minor numbers
++ * dynamically using a bitmask.  You must use hotplug tools, such as udev
++ * (or mdev with busybox) to create and destroy the /dev/ad7699B.C device
++ * nodes, since there is no fixed association of minor numbers with any
++ * particular SPI bus or device.
++ */
++#define AD7699_MAJOR   155 /* assigned */
++#define N_SPI_MINORS   32 /* ... up to 256 */
++
++static DECLARE_BITMAP(minors, N_SPI_MINORS);
++
++
++/* Bit masks for spi_device.mode management.  Note that incorrect
++ * settings for some settings can cause *lots* of trouble for other
++ * devices on a shared bus:
++ *
++ *  - CS_HIGH ... this device will be active when it shouldn't be
++ *  - 3WIRE ... when active, it won't behave as it should
++ *  - NO_CS ... there will be no explicit message boundaries; this
++ *	is completely incompatible with the shared bus model
++ *  - READY ... transfers may proceed when they shouldn't.
++ *
++ * REVISIT should changing those flags be privileged?
++ */
++#define SPI_MODE_MASK  (SPI_CPHA | SPI_CPOL | SPI_CS_HIGH \
++                        | SPI_LSB_FIRST | SPI_3WIRE | SPI_LOOP  \
++                        | SPI_NO_CS | SPI_READY)
++
++struct ad7699_data {
++        dev_t devt;
++        spinlock_t spi_lock;
++        struct spi_device *spi;
++        struct list_head device_entry;
++
++        /* buffer is NULL unless this device is open (users > 0) */
++        struct mutex buf_lock;
++        unsigned users;
++        u8   *buffer;
++};
++
++static LIST_HEAD(device_list);
++static DEFINE_MUTEX(device_list_lock);
++
++static unsigned bufsiz = 4096;
++module_param(bufsiz, uint, S_IRUGO);
++MODULE_PARM_DESC(bufsiz, "data bytes in biggest supported SPI message");
++
++
++static struct ad7699_data *ad7699_Bypass;
++
++/*-------------------------------------------------------------------------*/
++
++/*
++ * We can't use the standard synchronous wrappers for file I/O; we
++ * need to protect against async removal of the underlying spi_device.
++ */
++static void ad7699_complete(void *arg)
++{
++        complete(arg);
++}
++
++static ssize_t ad7699_sync(struct ad7699_data *ad7699, struct spi_message *message)
++{
++        DECLARE_COMPLETION_ONSTACK(done);
++        int status;
++
++        message->complete = ad7699_complete;
++        message->context = &done;
++
++        spin_lock_irq(&ad7699->spi_lock);
++        if (ad7699->spi == NULL)
++                status = -ESHUTDOWN;
++        else
++                status = spi_async(ad7699->spi, message);
++        spin_unlock_irq(&ad7699->spi_lock);
++
++        if (status == 0) {
++                wait_for_completion(&done);
++                status = message->status;
++                if (status == 0)
++                        status = message->actual_length;
++        }
++        return status;
++}
++
++static inline ssize_t ad7699_sync_write(struct ad7699_data *ad7699, size_t len)
++{
++        struct spi_transfer t = {
++                .tx_buf  = ad7699->buffer,
++                .len  = len,
++        };
++        struct spi_message m;
++
++        spi_message_init(&m);
++        spi_message_add_tail(&t, &m);
++        return ad7699_sync(ad7699, &m);
++}
++
++static inline ssize_t ad7699_sync_read(struct ad7699_data *ad7699, size_t len)
++{
++        struct spi_transfer t = {
++                .rx_buf  = ad7699->buffer,
++                .len  = len,
++        };
++        struct spi_message m;
++
++        spi_message_init(&m);
++        spi_message_add_tail(&t, &m);
++        return ad7699_sync(ad7699, &m);
++}
++
++/*-------------------------------------------------------------------------*/
++
++/* Read-only message with current device setup */
++static ssize_t ad7699_read(struct file *filp, char __user *buf, size_t count, loff_t *f_pos)
++{
++        struct ad7699_data *ad7699;
++        ssize_t status = 0;
++
++        /* chipselect only toggles at start or end of operation */
++        if (count > bufsiz)
++                return -EMSGSIZE;
++
++        ad7699 = filp->private_data;
++
++        mutex_lock(&ad7699->buf_lock);
++        status = ad7699_sync_read(ad7699, count);
++        if (status > 0) {
++                unsigned long missing;
++
++                missing = copy_to_user(buf, ad7699->buffer, status);
++                if (missing == status)
++                        status = -EFAULT;
++                else
++                        status = status - missing;
++        }
++        mutex_unlock(&ad7699->buf_lock);
++
++        return status;
++}
++
++/* Write-only message with current device setup */
++static ssize_t ad7699_write(struct file *filp, const char __user *buf,
++                            size_t count, loff_t *f_pos)
++{
++        struct ad7699_data *ad7699;
++        ssize_t status = 0;
++        unsigned long missing;
++
++        /* chipselect only toggles at start or end of operation */
++        if (count > bufsiz)
++                return -EMSGSIZE;
++
++        ad7699 = filp->private_data;
++
++        mutex_lock(&ad7699->buf_lock);
++        missing = copy_from_user(ad7699->buffer, buf, count);
++        if (missing == 0) {
++                status = ad7699_sync_write(ad7699, count);
++        } else
++                status = -EFAULT;
++        mutex_unlock(&ad7699->buf_lock);
++
++        return status;
++}
++
++static int ad7699_message(struct ad7699_data *ad7699,struct spi_ioc_transfer *u_xfers, unsigned n_xfers)
++{
++        struct spi_message msg;
++        struct spi_transfer *k_xfers;
++        struct spi_transfer *k_tmp;
++        struct spi_ioc_transfer *u_tmp;
++        unsigned n, total;
++        u8   *buf;
++        int status = -EFAULT;
++
++        spi_message_init(&msg);
++        k_xfers = kcalloc(n_xfers, sizeof(*k_tmp), GFP_KERNEL);
++        if (k_xfers == NULL)
++                return -ENOMEM;
++
++        /* Construct spi_message, copying any tx data to bounce buffer.
++         * We walk the array of user-provided transfers, using each one
++         * to initialize a kernel version of the same transfer.
++         */
++        buf = ad7699->buffer;
++        total = 0;
++        for (n = n_xfers, k_tmp = k_xfers, u_tmp = u_xfers;
++             n;
++             n--, k_tmp++, u_tmp++) {
++                k_tmp->len = u_tmp->len;
++
++                total += k_tmp->len;
++                /* Check total length of transfers.  Also check each
++                 * transfer length to avoid arithmetic overflow.
++                 */
++                if (total > bufsiz || k_tmp->len > bufsiz) {
++                        status = -EMSGSIZE;
++                        goto done;
++                }
++
++                if (u_tmp->rx_buf) {
++                        k_tmp->rx_buf = buf;
++                        if (!access_ok(VERIFY_WRITE, (u8 __user *)
++                                       (uintptr_t) u_tmp->rx_buf,
++                                       u_tmp->len))
++                                goto done;
++                }
++                if (u_tmp->tx_buf) {
++                        k_tmp->tx_buf = buf;
++                        if (copy_from_user(buf, (const u8 __user *)
++                                           (uintptr_t) u_tmp->tx_buf,
++                                           u_tmp->len))
++                                goto done;
++                }
++                buf += k_tmp->len;
++
++                k_tmp->cs_change = !!u_tmp->cs_change;
++                k_tmp->bits_per_word = u_tmp->bits_per_word;
++                k_tmp->delay_usecs = u_tmp->delay_usecs;
++                k_tmp->speed_hz = u_tmp->speed_hz;
++#ifdef VERBOSE
++                dev_dbg(&ad7699->spi->dev,
++                        "  xfer len %zd %s%s%s%dbits %u usec %uHz\n",
++                        u_tmp->len,
++                        u_tmp->rx_buf ? "rx " : "",
++                        u_tmp->tx_buf ? "tx " : "",
++                        u_tmp->cs_change ? "cs " : "",
++                        u_tmp->bits_per_word ? : ad7699->spi->bits_per_word,
++                        u_tmp->delay_usecs,
++                        u_tmp->speed_hz ? : ad7699->spi->max_speed_hz);
++#endif
++                spi_message_add_tail(k_tmp, &msg);
++        }
++
++        status = ad7699_sync(ad7699, &msg);
++        if (status < 0)
++                goto done;
++
++        /* copy any rx data out of bounce buffer */
++        buf = ad7699->buffer;
++        for (n = n_xfers, u_tmp = u_xfers; n; n--, u_tmp++) {
++                if (u_tmp->rx_buf) {
++                        if (__copy_to_user((u8 __user *)
++                                           (uintptr_t) u_tmp->rx_buf, buf,
++                                           u_tmp->len)) {
++                                status = -EFAULT;
++                                goto done;
++                        }
++                }
++                buf += u_tmp->len;
++        }
++        status = total;
++
++done:
++        kfree(k_xfers);
++        return status;
++}
++
++static long ad7699_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
++{
++        int err = 0;
++        int retval = 0;
++        struct ad7699_data *ad7699;
++        struct spi_device *spi;
++        u32 tmp;
++        unsigned n_ioc;
++        struct spi_ioc_transfer *ioc;
++
++        /* Check type and command number */
++        if (_IOC_TYPE(cmd) != SPI_IOC_MAGIC)
++                return -ENOTTY;
++
++        /* Check access direction once here; don't repeat below.
++         * IOC_DIR is from the user perspective, while access_ok is
++         * from the kernel perspective; so they look reversed.
++         */
++        if (_IOC_DIR(cmd) & _IOC_READ)
++                err = !access_ok(VERIFY_WRITE,
++                                 (void __user *)arg, _IOC_SIZE(cmd));
++        if (err == 0 && _IOC_DIR(cmd) & _IOC_WRITE)
++                err = !access_ok(VERIFY_READ,
++                                 (void __user *)arg, _IOC_SIZE(cmd));
++        if (err)
++                return -EFAULT;
++
++        /* guard against device removal before, or while,
++         * we issue this ioctl.
++         */
++        ad7699 = filp->private_data;
++        spin_lock_irq(&ad7699->spi_lock);
++        spi = spi_dev_get(ad7699->spi);
++        spin_unlock_irq(&ad7699->spi_lock);
++
++        if (spi == NULL)
++                return -ESHUTDOWN;
++
++        /* use the buffer lock here for triple duty:
++         *  - prevent I/O (from us) so calling spi_setup() is safe;
++         *  - prevent concurrent SPI_IOC_WR_* from morphing
++         *    data fields while SPI_IOC_RD_* reads them;
++         *  - SPI_IOC_MESSAGE needs the buffer locked "normally".
++         */
++        mutex_lock(&ad7699->buf_lock);
++
++        switch (cmd) {
++        /* read requests */
++        case SPI_IOC_RD_MODE:
++                retval = __put_user(spi->mode & SPI_MODE_MASK,
++                                    (__u8 __user *)arg);
++                break;
++        case SPI_IOC_RD_LSB_FIRST:
++                retval = __put_user((spi->mode & SPI_LSB_FIRST) ?  1 : 0,
++                                    (__u8 __user *)arg);
++                break;
++        case SPI_IOC_RD_BITS_PER_WORD:
++                retval = __put_user(spi->bits_per_word, (__u8 __user *)arg);
++                break;
++        case SPI_IOC_RD_MAX_SPEED_HZ:
++                retval = __put_user(spi->max_speed_hz, (__u32 __user *)arg);
++                break;
++
++        /* write requests */
++        case SPI_IOC_WR_MODE:
++                retval = __get_user(tmp, (u8 __user *)arg);
++                if (retval == 0) {
++                        u8 save = spi->mode;
++
++                        if (tmp & ~SPI_MODE_MASK) {
++                                retval = -EINVAL;
++                                break;
++                        }
++
++                        tmp |= spi->mode & ~SPI_MODE_MASK;
++                        spi->mode = (u8)tmp;
++                        retval = spi_setup(spi);
++                        if (retval < 0)
++                                spi->mode = save;
++                        else
++                                dev_dbg(&spi->dev, "spi mode %02x\n", tmp);
++
++                        printk(KERN_INFO "@@@@@@@@@@@@@@@@@@@@@ SPI_IOC_WR_MODE");
++                        printk(KERN_INFO "@@@@@@@@@@@@@@@@@@@@@ spi mode %02x\n", spi->mode);
++                        printk(KERN_INFO "@@@@@@@@@@@@@@@@@@@@@ %d bits per word\n", spi->bits_per_word);
++                        printk(KERN_INFO "@@@@@@@@@@@@@@@@@@@@@ %d Hz (max)\n", spi->max_speed_hz);
++
++                }
++                break;
++        case SPI_IOC_WR_LSB_FIRST:
++                retval = __get_user(tmp, (__u8 __user *)arg);
++                if (retval == 0) {
++                        u8 save = spi->mode;
++
++                        if (tmp)
++                                spi->mode |= SPI_LSB_FIRST;
++                        else
++                                spi->mode &= ~SPI_LSB_FIRST;
++                        retval = spi_setup(spi);
++                        if (retval < 0)
++                                spi->mode = save;
++                        else
++                                dev_dbg(&spi->dev, "%csb first\n",
++                                        tmp ? 'l' : 'm');
++
++                        printk(KERN_INFO "@@@@@@@@@@@@@@@@@@@@@ SPI_IOC_WR_LSB_FIRST");
++                        printk(KERN_INFO "@@@@@@@@@@@@@@@@@@@@@ spi mode %02x\n", spi->mode);
++                        printk(KERN_INFO "@@@@@@@@@@@@@@@@@@@@@ %d bits per word\n", spi->bits_per_word);
++                        printk(KERN_INFO "@@@@@@@@@@@@@@@@@@@@@ %d Hz (max)\n", spi->max_speed_hz);
++
++
++                }
++                break;
++        case SPI_IOC_WR_BITS_PER_WORD:
++                retval = __get_user(tmp, (__u8 __user *)arg);
++                if (retval == 0) {
++                        u8 save = spi->bits_per_word;
++
++                        spi->bits_per_word = tmp;
++                        retval = spi_setup(spi);
++                        if (retval < 0)
++                                spi->bits_per_word = save;
++                        else
++                                dev_dbg(&spi->dev, "%d bits per word\n", tmp);
++                        printk(KERN_INFO "@@@@@@@@@@@@@@@@@@@@@ SPI_IOC_WR_BITS_PER_WORD");
++                        printk(KERN_INFO "@@@@@@@@@@@@@@@@@@@@@ spi mode %02x\n", spi->mode);
++                        printk(KERN_INFO "@@@@@@@@@@@@@@@@@@@@@ %d bits per word\n", spi->bits_per_word);
++                        printk(KERN_INFO "@@@@@@@@@@@@@@@@@@@@@ %d Hz (max)\n", spi->max_speed_hz);
++
++
++                }
++                break;
++        case SPI_IOC_WR_MAX_SPEED_HZ:
++                retval = __get_user(tmp, (__u32 __user *)arg);
++                if (retval == 0) {
++                        u32 save = spi->max_speed_hz;
++
++                        spi->max_speed_hz = tmp;
++                        retval = spi_setup(spi);
++                        if (retval < 0)
++                                spi->max_speed_hz = save;
++                        else
++                                dev_dbg(&spi->dev, "%d Hz (max)\n", tmp);
++
++
++                        printk(KERN_INFO "@@@@@@@@@@@@@@@@@@@@@ SPI_IOC_WR_MAX_SPEED_HZ");
++                        printk(KERN_INFO "@@@@@@@@@@@@@@@@@@@@@ spi mode %02x\n", spi->mode);
++                        printk(KERN_INFO "@@@@@@@@@@@@@@@@@@@@@ %d bits per word\n", spi->bits_per_word);
++                        printk(KERN_INFO "@@@@@@@@@@@@@@@@@@@@@ %d Hz (max)\n", spi->max_speed_hz);
++
++                }
++                break;
++
++        default:
++                /* segmented and/or full-duplex I/O request */
++                if (_IOC_NR(cmd) != _IOC_NR(SPI_IOC_MESSAGE(0))
++                    || _IOC_DIR(cmd) != _IOC_WRITE) {
++                        retval = -ENOTTY;
++                        break;
++                }
++
++                tmp = _IOC_SIZE(cmd);
++                if ((tmp % sizeof(struct spi_ioc_transfer)) != 0) {
++                        retval = -EINVAL;
++                        break;
++                }
++                n_ioc = tmp / sizeof(struct spi_ioc_transfer);
++                if (n_ioc == 0)
++                        break;
++
++                /* copy into scratch area */
++                ioc = kmalloc(tmp, GFP_KERNEL);
++                if (!ioc) {
++                        retval = -ENOMEM;
++                        break;
++                }
++                if (__copy_from_user(ioc, (void __user *)arg, tmp)) {
++                        kfree(ioc);
++                        retval = -EFAULT;
++                        break;
++                }
++
++                /* translate to spi_message, execute */
++                retval = ad7699_message(ad7699, ioc, n_ioc);
++                kfree(ioc);
++                break;
++        }
++
++        mutex_unlock(&ad7699->buf_lock);
++        spi_dev_put(spi);
++        return retval;
++}
++
++#ifdef CONFIG_COMPAT
++static long
++ad7699_compat_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
++{
++        return ad7699_ioctl(filp, cmd, (unsigned long)compat_ptr(arg));
++}
++#else
++#define ad7699_compat_ioctl NULL
++#endif /* CONFIG_COMPAT */
++
++static int ad7699_open(struct inode *inode, struct file *filp)
++{
++        struct ad7699_data *ad7699;
++        int status = -ENXIO;
++
++        mutex_lock(&device_list_lock);
++
++        list_for_each_entry(ad7699, &device_list, device_entry) {
++                if (ad7699->devt == inode->i_rdev) {
++                        status = 0;
++                        break;
++                }
++        }
++        if (status == 0) {
++                if (!ad7699->buffer) {
++                        ad7699->buffer = kmalloc(bufsiz, GFP_KERNEL);
++                        if (!ad7699->buffer) {
++                                dev_dbg(&ad7699->spi->dev, "open/ENOMEM\n");
++                                status = -ENOMEM;
++                        }
++                }
++                if (status == 0) {
++                        ad7699->users++;
++                        filp->private_data = ad7699;
++                        nonseekable_open(inode, filp);
++                }
++        } else
++                pr_debug("ad7699: nothing for minor %d\n", iminor(inode));
++
++        mutex_unlock(&device_list_lock);
++        return status;
++}
++
++static int ad7699_release(struct inode *inode, struct file *filp)
++{
++        struct ad7699_data *ad7699;
++        int status = 0;
++
++        mutex_lock(&device_list_lock);
++        ad7699 = filp->private_data;
++        filp->private_data = NULL;
++
++        /* last close? */
++        ad7699->users--;
++        if (!ad7699->users) {
++                int dofree;
++
++                kfree(ad7699->buffer);
++                ad7699->buffer = NULL;
++
++                /* ... after we unbound from the underlying device? */
++                spin_lock_irq(&ad7699->spi_lock);
++                dofree = (ad7699->spi == NULL);
++                spin_unlock_irq(&ad7699->spi_lock);
++
++                if (dofree)
++                        kfree(ad7699);
++        }
++        mutex_unlock(&device_list_lock);
++
++        return status;
++}
++
++static const struct file_operations ad7699_fops = {
++        .owner = THIS_MODULE,
++        /* REVISIT switch to aio primitives, so that userspace
++         * gets more complete API coverage.  It'll simplify things
++         * too, except for the locking.
++         */
++        .write = ad7699_write,
++        .read =  ad7699_read,
++        .unlocked_ioctl = ad7699_ioctl,
++        .compat_ioctl = ad7699_compat_ioctl,
++        .open =  ad7699_open,
++        .release = ad7699_release,
++        .llseek = no_llseek,
++};
++
++/*-------------------------------------------------------------------------*/
++
++/* The main reason to have this class is to make mdev/udev create the
++ * /dev/ad7699B.C character device nodes exposing our userspace API.
++ * It also simplifies memory management.
++ */
++
++static struct class *ad7699_class;
++
++/*-------------------------------------------------------------------------*/
++
++static int ad7699_probe(struct spi_device *spi)
++{
++        struct ad7699_data *ad7699;
++        int status;
++        unsigned long minor;
++
++        /* Allocate driver data */
++        ad7699 = kzalloc(sizeof(*ad7699), GFP_KERNEL);
++        if (!ad7699)
++        {
++//		printk(KERN_INFO "@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@ -1 %s \n",__FUNCTION__);
++                return -ENOMEM;
++        }
++        /* Initialize the driver data */
++        ad7699->spi = spi;
++
++
++        spin_lock_init(&ad7699->spi_lock);
++        mutex_init(&ad7699->buf_lock);
++
++        INIT_LIST_HEAD(&ad7699->device_entry);
++
++        /* If we can allocate a minor number, hook up this device.
++         * Reusing minors is fine so long as udev or mdev is working.
++         */
++        mutex_lock(&device_list_lock);
++
++//	printk(KERN_INFO "@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@ 1 %s \n",__FUNCTION__);
++        minor = find_first_zero_bit(minors, N_SPI_MINORS);
++        if (minor < N_SPI_MINORS) {
++                struct device *dev;
++
++                ad7699->devt = MKDEV(AD7699_MAJOR, minor);
++                dev = device_create(ad7699_class, &spi->dev, ad7699->devt,
++                                    ad7699, "spiadc%d.%d",
++                                    spi->master->bus_num, spi->chip_select);
++//		printk(KERN_INFO "@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@ 2 %s \n",__FUNCTION__);
++                status = PTR_RET(dev);
++        }
++        else
++        {
++//		printk(KERN_INFO "@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@ 3 %s \n",__FUNCTION__);
++                dev_dbg(&spi->dev, "no minor number available!\n");
++                status = -ENODEV;
++        }
++        if (status == 0)
++        {
++                //	printk(KERN_INFO "@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@ 4 %s \n",__FUNCTION__);
++                set_bit(minor, minors);
++                list_add(&ad7699->device_entry, &device_list);
++        }
++        mutex_unlock(&device_list_lock);
++
++        if (status == 0)
++        {
++                spi_set_drvdata(spi, ad7699);
++                ad7699_Bypass=ad7699;
++                //	printk(KERN_INFO "@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@ 5 %s \n",__FUNCTION__);
++        }
++        else
++        {
++                //	printk(KERN_INFO "@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@ 6 %s \n",__FUNCTION__);
++                kfree(ad7699);
++        }
++        return status;
++}
++
++static int ad7699_remove(struct spi_device *spi)
++{
++        struct ad7699_data *ad7699 = spi_get_drvdata(spi);
++
++        /* make sure ops on existing fds can abort cleanly */
++        spin_lock_irq(&ad7699->spi_lock);
++        ad7699->spi = NULL;
++        spi_set_drvdata(spi, NULL);
++        spin_unlock_irq(&ad7699->spi_lock);
++
++        /* prevent new opens */
++        mutex_lock(&device_list_lock);
++        list_del(&ad7699->device_entry);
++        device_destroy(ad7699_class, ad7699->devt);
++        clear_bit(MINOR(ad7699->devt), minors);
++        if (ad7699->users == 0)
++                kfree(ad7699);
++        mutex_unlock(&device_list_lock);
++
++        return 0;
++}
++
++static const struct of_device_id ad7699_dt_ids[] = {
++        { .compatible = "ad7699_spi" },
++        {},
++};
++
++MODULE_DEVICE_TABLE(of, ad7699_dt_ids);
++
++static struct spi_driver ad7699_spi_driver = {
++        .driver = {
++                .name =  "ad7699",
++                .owner = THIS_MODULE,
++                .of_match_table = of_match_ptr(ad7699_dt_ids),
++        },
++        .probe = ad7699_probe,
++        .remove = ad7699_remove,
++
++        /* NOTE:  suspend/resume methods are not necessary here.
++         * We don't do anything except pass the requests to/from
++         * the underlying controller.  The refrigerator handles
++         * most issues; the controller driver handles the rest.
++         */
++};
++
++/*-------------------------------------------------------------------------*/
++
++static int __init ad7699_init(void)
++{
++        int status;
++
++        /* Claim our 256 reserved device numbers.  Then register a class
++         * that will key udev/mdev to add/remove /dev nodes.  Last, register
++         * the driver which manages those device numbers.
++         */
++        BUILD_BUG_ON(N_SPI_MINORS > 256);
++        status = register_chrdev(AD7699_MAJOR, "spiadc", &ad7699_fops);
++//	printk(KERN_INFO "@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@ 10 %s \n",__FUNCTION__);
++        if (status < 0)
++                return status;
++// printk(KERN_INFO "@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@ 11 %s \n",__FUNCTION__);
++        ad7699_class = class_create(THIS_MODULE, "ad7699");
++//	printk(KERN_INFO "@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@ 12 %s \n",__FUNCTION__);
++        if (IS_ERR(ad7699_class)) {
++                unregister_chrdev(AD7699_MAJOR, ad7699_spi_driver.driver.name);
++                return PTR_ERR(ad7699_class);
++        }
++// printk(KERN_INFO "@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@ 13 %s \n",__FUNCTION__);
++        status = spi_register_driver(&ad7699_spi_driver);
++        if (status < 0) {
++                // printk(KERN_INFO "@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@ 14 %s \n",__FUNCTION__);
++                class_destroy(ad7699_class);
++                unregister_chrdev(AD7699_MAJOR, ad7699_spi_driver.driver.name);
++        }
++        // printk(KERN_INFO "@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@ 15 %s \n",__FUNCTION__);
++        return status;
++}
++module_init(ad7699_init);
++
++static void __exit ad7699_exit(void)
++{
++        spi_unregister_driver(&ad7699_spi_driver);
++        class_destroy(ad7699_class);
++        unregister_chrdev(AD7699_MAJOR, ad7699_spi_driver.driver.name);
++}
++module_exit(ad7699_exit);
++
++
++int Bypass_ad7699_open(void)
++{
++        int status = 0;
++        if (!ad7699_Bypass->buffer) {
++                ad7699_Bypass->buffer = kmalloc(bufsiz, GFP_KERNEL);
++                if (!ad7699_Bypass->buffer)
++                {
++                        dev_dbg(&ad7699_Bypass->spi->dev, "open/ENOMEM\n");
++                        status = -ENOMEM;
++                }
++        }
++
++        ad7699_Bypass->users = 1;
++
++        return status;
++}
++EXPORT_SYMBOL_GPL(Bypass_ad7699_open);
++
++int Bypass_ad7699_close(void)
++{
++        int status = 0;
++        /* last close? */
++        ad7699_Bypass->users = 0;
++        kfree(ad7699_Bypass->buffer);
++        return status;
++}
++EXPORT_SYMBOL_GPL(Bypass_ad7699_close);
++
++
++int Bypass_ad7699_init(struct spi_setting *spiSet)
++{
++        int status = 0;
++        int retval = 0;
++        u32 tmp;
++        u8 save_mode;
++        u8 save_bits;
++        u8 save_speed;
++        struct spi_device *spi;
++
++
++        /* last close? */
++        if(ad7699_Bypass->users < 1 )
++        {
++                status = -ENOMEM;
++                printk(KERN_INFO "@@@ function : %s line : %d FAILED!!! \n",__FUNCTION__, __LINE__);
++        }
++        else
++        {
++
++
++                spin_lock_irq(&ad7699_Bypass->spi_lock);
++                spi = spi_dev_get(ad7699_Bypass->spi);
++                spin_unlock_irq(&ad7699_Bypass->spi_lock);
++                if (spi == NULL)
++                {
++                        printk(KERN_INFO "@@@ function : %s line : %d FAILED!!! \n",__FUNCTION__, __LINE__);
++                        return -ESHUTDOWN;
++                }
++
++                /* write requests */
++                mutex_lock(&ad7699_Bypass->buf_lock);
++                save_mode  = spi->mode;
++                save_bits  = spi->bits_per_word;
++                save_speed = spi->max_speed_hz;
++
++// Impostazione SPI mode
++                tmp  = spiSet->mode;
++                tmp |= spi->mode & ~SPI_MODE_MASK;
++                spi->mode = (u8)tmp;
++
++                // if (spiSet->lsbF)
++                //         tmp |= SPI_LSB_FIRST;
++                // else
++                //         tmp &= ~SPI_LSB_FIRST;
++                // spi->mode = (u8)tmp;
++
++// Impostazione SPI bits per word
++                spi->bits_per_word = spiSet->bits_per_word;
++// Impostazione SPI Max Speed
++                spi->max_speed_hz = spiSet->max_speed_hz;
++
++                // printk(KERN_INFO "@@@@@@@@@@@@@@@@@@@@@ spi mode %02x\n", spi->mode);
++                //  printk(KERN_INFO "@@@@@@@@@@@@@@@@@@@@@ %csb first\n", spiSet->lsbF ? 'l' : 'm');
++                // printk(KERN_INFO "@@@@@@@@@@@@@@@@@@@@@ %d bits per word\n", spi->bits_per_word);
++                // printk(KERN_INFO "@@@@@@@@@@@@@@@@@@@@@ %d Hz (max)\n", spi->max_speed_hz);
++
++                retval = spi_setup(spi);
++                if (retval < 0)
++                {
++                        spi->mode           = save_mode;
++                        spi->bits_per_word  = save_bits;
++                        spi->max_speed_hz   = save_speed;
++
++                        printk(KERN_INFO "@@@ function : %s line : %d FAILED!!! \n",__FUNCTION__, __LINE__);
++                }
++                else
++                {
++                        dev_dbg(&spi->dev, "spi mode %02x\n", spi->mode);
++//                        dev_dbg(&spi->dev, "%csb first\n", spiSet->lsbF ? 'l' : 'm');
++                        dev_dbg(&spi->dev, "%d bits per word\n", spi->bits_per_word);
++                        dev_dbg(&spi->dev, "%d Hz (max)\n", spi->max_speed_hz);
++//                        printk(KERN_INFO "@@@ function : %s line : %d OK!!! \n",__FUNCTION__, __LINE__);
++                }
++                mutex_unlock(&ad7699_Bypass->buf_lock);
++                spi_dev_put(spi);
++        }
++        return retval;
++
++}
++EXPORT_SYMBOL_GPL(Bypass_ad7699_init);
++
++int Bypass_ad7699_message(struct spi_ioc_transfer *u_xfers, unsigned n_xfers)
++{
++        int iierr=0;
++        /* write requests */
++        mutex_lock(&ad7699_Bypass->buf_lock);
++        // printk(KERN_INFO "@@@ function : %s line : %d HERE!!! \n",__FUNCTION__, __LINE__);
++        iierr=ad7699_message(ad7699_Bypass,u_xfers,n_xfers);
++        mutex_unlock(&ad7699_Bypass->buf_lock);
++        return (iierr);
++}
++EXPORT_SYMBOL_GPL(Bypass_ad7699_message);
++
++
++MODULE_AUTHOR("Andrea Gai, <a.gai@niceonecode.it>");
++MODULE_DESCRIPTION("User mode SPI device interface");
++MODULE_LICENSE("GPL");
++MODULE_ALIAS("spiadc:ad7699");
+diff --git a/include/linux/spi/ad7699.h b/include/linux/spi/ad7699.h
+new file mode 100644
+index 0000000..2a3bb3a
+--- /dev/null
++++ b/include/linux/spi/ad7699.h
+@@ -0,0 +1,149 @@
++/*
++ * include/linux/spi/ad7699.h
++ *
++ * Copyright (C) 2006 SWAPP
++ *	Andrea Paterniani <a.paterniani@swapp-eng.it>
++ *
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation; either version 2 of the License, or
++ * (at your option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program; if not, write to the Free Software
++ * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
++ */
++
++#ifndef AD7699_H
++#define AD7699_H
++
++#include <linux/types.h>
++
++/* User space versions of kernel symbols for SPI clocking modes,
++ * matching <linux/spi/spi.h>
++ */
++
++#define SPI_CPHA    0x01
++#define SPI_CPOL    0x02
++
++#define SPI_MODE_0    (0|0)
++#define SPI_MODE_1    (0|SPI_CPHA)
++#define SPI_MODE_2    (SPI_CPOL|0)
++#define SPI_MODE_3    (SPI_CPOL|SPI_CPHA)
++
++#define SPI_CS_HIGH   0x04
++#define SPI_LSB_FIRST   0x08
++#define SPI_3WIRE   0x10
++#define SPI_LOOP    0x20
++#define SPI_NO_CS   0x40
++#define SPI_READY   0x80
++#define SPI_TX_DUAL   0x100
++#define SPI_TX_QUAD   0x200
++#define SPI_RX_DUAL   0x400
++#define SPI_RX_QUAD   0x800
++
++/*---------------------------------------------------------------------------*/
++
++/* IOCTL commands */
++
++#define SPI_IOC_MAGIC     'k'
++
++/**
++ * struct spi_ioc_transfer - describes a single SPI transfer
++ * @tx_buf: Holds pointer to userspace buffer with transmit data, or null.
++ *	If no data is provided, zeroes are shifted out.
++ * @rx_buf: Holds pointer to userspace buffer for receive data, or null.
++ * @len: Length of tx and rx buffers, in bytes.
++ * @speed_hz: Temporary override of the device's bitrate.
++ * @bits_per_word: Temporary override of the device's wordsize.
++ * @delay_usecs: If nonzero, how long to delay after the last bit transfer
++ *	before optionally deselecting the device before the next transfer.
++ * @cs_change: True to deselect device before starting the next transfer.
++ *
++ * This structure is mapped directly to the kernel spi_transfer structure;
++ * the fields have the same meanings, except of course that the pointers
++ * are in a different address space (and may be of different sizes in some
++ * cases, such as 32-bit i386 userspace over a 64-bit x86_64 kernel).
++ * Zero-initialize the structure, including currently unused fields, to
++ * accommodate potential future updates.
++ *
++ * SPI_IOC_MESSAGE gives userspace the equivalent of kernel spi_sync().
++ * Pass it an array of related transfers, they'll execute together.
++ * Each transfer may be half duplex (either direction) or full duplex.
++ *
++ *	struct spi_ioc_transfer mesg[4];
++ *	...
++ *	status = ioctl(fd, SPI_IOC_MESSAGE(4), mesg);
++ *
++ * So for example one transfer might send a nine bit command (right aligned
++ * in a 16-bit word), the next could read a block of 8-bit data before
++ * terminating that command by temporarily deselecting the chip; the next
++ * could send a different nine bit command (re-selecting the chip), and the
++ * last transfer might write some register values.
++ */
++struct spi_ioc_transfer {
++        __u64 tx_buf;
++        __u64 rx_buf;
++
++        __u32 len;
++        __u32 speed_hz;
++
++        __u16 delay_usecs;
++        __u8 bits_per_word;
++        __u8 cs_change;
++        __u8 tx_nbits;
++        __u8 rx_nbits;
++        __u16 pad;
++
++        /* If the contents of 'struct spi_ioc_transfer' ever change
++         * incompatibly, then the ioctl number (currently 0) must change;
++         * ioctls with constant size fields get a bit more in the way of
++         * error checking than ones (like this) where that field varies.
++         *
++         * NOTE: struct layout is the same in 64bit and 32bit userspace.
++         */
++};
++
++struct spi_setting {
++        __u32 max_speed_hz;
++        __u8 bits_per_word;
++        __u8 lsbF;
++        __u8 mode;
++};
++
++
++/* not all platforms use <asm-generic/ioctl.h> or _IOC_TYPECHECK() ... */
++#define SPI_MSGSIZE(N) \
++        ((((N)*(sizeof (struct spi_ioc_transfer))) < (1 << _IOC_SIZEBITS)) \
++         ? ((N)*(sizeof (struct spi_ioc_transfer))) : 0)
++#define SPI_IOC_MESSAGE(N) _IOW(SPI_IOC_MAGIC, 0, char[SPI_MSGSIZE(N)])
++
++
++/* Read / Write of SPI mode (SPI_MODE_0..SPI_MODE_3) (limited to 8 bits) */
++#define SPI_IOC_RD_MODE     _IOR(SPI_IOC_MAGIC, 1, __u8)
++#define SPI_IOC_WR_MODE     _IOW(SPI_IOC_MAGIC, 1, __u8)
++
++/* Read / Write SPI bit justification */
++#define SPI_IOC_RD_LSB_FIRST    _IOR(SPI_IOC_MAGIC, 2, __u8)
++#define SPI_IOC_WR_LSB_FIRST    _IOW(SPI_IOC_MAGIC, 2, __u8)
++
++/* Read / Write SPI device word length (1..N) */
++#define SPI_IOC_RD_BITS_PER_WORD  _IOR(SPI_IOC_MAGIC, 3, __u8)
++#define SPI_IOC_WR_BITS_PER_WORD  _IOW(SPI_IOC_MAGIC, 3, __u8)
++
++/* Read / Write SPI device default max speed hz */
++#define SPI_IOC_RD_MAX_SPEED_HZ   _IOR(SPI_IOC_MAGIC, 4, __u32)
++#define SPI_IOC_WR_MAX_SPEED_HZ   _IOW(SPI_IOC_MAGIC, 4, __u32)
++
++/* Read / Write of the SPI mode field */
++#define SPI_IOC_RD_MODE32   _IOR(SPI_IOC_MAGIC, 5, __u32)
++#define SPI_IOC_WR_MODE32   _IOW(SPI_IOC_MAGIC, 5, __u32)
++
++
++
++#endif /* AD7699_H */
+-- 
+2.7.4
+

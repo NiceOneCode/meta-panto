@@ -1,0 +1,45 @@
+<?xml version = '1.0' encoding = 'UTF-8'?>
+<!DOCTYPE cpu SYSTEM "mt-project_with_ip.dtd">
+<cpu name="CBMPANT-TA" >
+<!-- ICD_DB_VERSION 0.0.0.0 -->
+<!-- DEVICE_INTERFACE_VERSION 1.0.0.4 -->
+<!-- GDB_TOOL_VERSION 5.7.0 -->
+<bus-interface-list>
+<bus-interface type="ETH" address="0" name="ETH_1">
+<!-- Instance Specific Telegrams -->
+<!-- Generic Telegrams -->
+ <telegram type="sink" data-set-id="26000" size="72" name="iPANTCS" class="absolute" com-parameter-id="1" com-id="26001">
+ <pd-receive-parameter source-uri="" timeout-value="1000"  validity-behavior="1" />
+ <pd-send-parameter destination-uri="239.0.0.26" cycle-time="200"  redundant="0" />
+ </telegram>
+ <telegram type="sink" data-set-id="26100" size="66" name="iPANSMC" class="absolute" com-parameter-id="1" com-id="26102">
+ <pd-receive-parameter source-uri="" timeout-value="1000"  validity-behavior="1" />
+ <pd-send-parameter destination-uri="239.0.1.26" cycle-time="200"  redundant="0" />
+ </telegram>
+ <telegram type="source" data-set-id="26400" size="184" name="oPANStsTA" class="absolute" com-parameter-id="1" com-id="26421">
+ <pd-send-parameter destination-uri="239.0.0.18" cycle-time="200"  redundant="0" />
+ </telegram>
+ <telegram type="source" data-set-id="26400" size="184" name="oPANStsTB" class="absolute" com-parameter-id="1" com-id="26431">
+ <pd-send-parameter destination-uri="239.0.0.18" cycle-time="200"  redundant="0" />
+ </telegram>
+ 
+</bus-interface>
+</bus-interface-list> 
+<data-set-list>
+	<data-set data-set-id="26000">
+        <process-variable name="IArrayCCU"		type="UINT8" 	offset="0"		array-size="72"		unit=""  scale="1.0"  zero-offset="0" >   </process-variable>
+	</data-set>
+	<data-set data-set-id="26100">
+        <process-variable name="IArraySMC"		type="UINT8" 	offset="0"		array-size="66"		unit=""  scale="1.0"  zero-offset="0" >   </process-variable>
+	</data-set>
+	<data-set data-set-id="26400">
+        <process-variable name="OArray"			type="UINT8" 	offset="0"		array-size="184"	unit=""  scale="1.0"  zero-offset="0" >   </process-variable>
+	</data-set>
+
+</data-set-list>
+<com-parameter-list>
+ <network-parameter-ip com-parameter-id= "1" qos= "5" name= "IP_1" time-to-live= "64"  />
+</com-parameter-list>
+
+<debug level-iptcom="w"/>
+</cpu>

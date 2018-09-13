@@ -1,0 +1,177 @@
+<?xml version="1.0" encoding="windows-1250"?>
+<p-list>
+       <p id="1" v="1000"/>     <!-- Serial Number Panto -->
+       <p id="2" v="172"/>      <!-- IP Address Ta Byte 1 -->
+       <p id="3" v="16"/>       <!-- IP Address Ta Byte 2 -->
+       <p id="4" v="3"/>        <!-- IP Address Ta Byte 3 -->
+       <p id="5" v="32"/>       <!-- IP Address Ta Byte 4 -->
+       <p id="6" v="172"/>      <!-- IP Address Tb Byte 1 -->
+       <p id="7" v="16"/>       <!-- IP Address Tb Byte 2 -->
+       <p id="8" v="3"/>        <!-- IP Address Tb Byte 3 -->
+       <p id="9" v="33"/>       <!-- IP Address Tb Byte 4 -->              
+       <p id="10" v="1500"/>    <!-- Time Start Check Raise Time (msec) -->
+       <p id="11" v="1500"/>    <!-- Time Start Check Lower Time (msec) -->
+       <p id="12" v="100"/>     <!-- Positive Thr for Raise Time (mV) -->
+       <p id="13" v="100"/>     <!-- Negative Thr for Raise Time (mV) -->
+       <p id="14" v="100"/>     <!-- Positive Thr for Lower Time (mV) -->
+       <p id="15" v="100"/>     <!-- Negative Thr for Lower Time (mV) -->
+       <p id="16" v="15000"/>   <!-- Max Time for Raise Time Alert (msec) -->
+       <p id="17" v="15000"/>   <!-- Max Time for Lower Time Alert (msec) -->
+       <p id="18" v="10000"/>   <!-- Max Num Sollevamenti -->
+       <p id="19" v="50000"/>   <!-- Max Km Percorsi -->
+       <p id="20" v="100"/>     <!-- Sens Acc 1 (x100) -->
+       <p id="21" v="100"/>     <!-- Sens Acc 2 (x100) -->
+       <p id="22" v="100"/>     <!-- Sens Acc 3 (x100) -->
+       <p id="23" v="100"/>     <!-- Sens Acc 4 (x100) -->
+       <p id="24" v="1000"/>    <!-- Distanza Trigger FFT (m) -->
+       <p id="25" v="40000"/>   <!-- Vmax (100*km/h) -->
+       <p id="26" v="3000"/>    <!-- VminFFT (100*km/h) -->
+       <p id="27" v="3000"/>    <!-- VminMOB (100*km/h) -->
+       <p id="28" v="7000"/>    <!-- VminRAW (100*km/h) -->
+       <p id="29" v="40"/>      <!-- DistBufferSave (m)--> 
+       <p id="30" v="20"/>      <!-- Overlap (m) -->
+       <p id="31" v="200"/>     <!-- RmsMobile -->
+       <p id="32" v="500"/>     <!-- SamplingRate -->
+       <p id="33" v="0"/>       <!-- LimInf Band 1 -->
+       <p id="34" v="5"/>       <!-- LimSup Band 1 -->
+       <p id="35" v="5"/>       <!-- LimInf Band 2 -->
+       <p id="36" v="30"/>      <!-- LimSup Band 2 -->
+       <p id="37" v="115"/>     <!-- LimInf Band 3 -->
+       <p id="38" v="145"/>     <!-- LimSup Band 3 -->
+       <p id="39" v="0"/>       <!-- LimInf Band 4 -->
+       <p id="40" v="180"/>     <!-- LimSup Band 4 -->
+       <p id="41" v="16000"/>   <!-- Vel threshold 1 (100*km/h) -->
+       <p id="42" v="20000"/>   <!-- Vel threshold 2 (100*km/h) -->
+       <p id="43" v="24000"/>   <!-- Vel threshold 3 (100*km/h) -->
+       <p id="44" v="28000"/>   <!-- Vel threshold 4 (100*km/h) -->
+       <p id="45" v="32000"/>   <!-- Vel threshold 5 (100*km/h) -->
+       <p id="46" v="40000"/>   <!-- Vel threshold 6 (100*km/h) -->
+       <p id="47" v="500"/>     <!-- RmsThr0Vel0FwFr -->
+       <p id="48" v="900"/>     <!-- RmsThr1Vel0FwFr -->
+       <p id="49" v="1200"/>    <!-- RmsThr2Vel0FwFr -->
+       <p id="50" v="1900"/>    <!-- RmsThr3Vel0FwFr -->
+       <p id="51" v="500"/>     <!-- RmsThr0Vel1FwFr -->
+       <p id="52" v="900"/>     <!-- RmsThr1Vel1FwFr -->
+       <p id="53" v="1200"/>    <!-- RmsThr2Vel1FwFr -->
+       <p id="54" v="1900"/>    <!-- RmsThr3Vel2FwFr -->
+       <p id="55" v="500"/>     <!-- RmsThr0Vel2FwFr -->
+       <p id="56" v="900"/>     <!-- RmsThr1Vel2FwFr -->
+       <p id="57" v="1200"/>    <!-- RmsThr2Vel2FwFr -->                                         
+       <p id="58" v="1900"/>    <!-- RmsThr3Vel3FwFr -->
+       <p id="59" v="500"/>     <!-- RmsThr0Vel3FwFr -->
+       <p id="60" v="900"/>     <!-- RmsThr1Vel3FwFr -->
+       <p id="61" v="1200"/>    <!-- RmsThr2Vel3FwFr -->
+       <p id="62" v="1900"/>    <!-- RmsThr3Vel0FwFr -->
+       <p id="63" v="500"/>     <!-- RmsThr0Vel4FwFr -->
+       <p id="64" v="900"/>     <!-- RmsThr1Vel4FwFr -->
+       <p id="65" v="1200"/>    <!-- RmsThr2Vel4FwFr -->
+       <p id="66" v="1900"/>    <!-- RmsThr3Vel4FwFr -->
+       <p id="67" v="500"/>     <!-- RmsThr0Vel5FwFr -->                                          
+       <p id="68" v="900"/>     <!-- RmsThr1Vel5FwFr -->
+       <p id="69" v="1200"/>    <!-- RmsThr2Vel5FwFr -->
+       <p id="70" v="1900"/>    <!-- RmsThr3Vel5FwFr -->
+       <p id="71" v="500"/>     <!-- RmsThr0Vel0FwBk -->
+       <p id="72" v="900"/>     <!-- RmsThr1Vel0FwBk -->
+       <p id="73" v="1200"/>    <!-- RmsThr2Vel0FwBk -->
+       <p id="74" v="1900"/>    <!-- RmsThr3Vel0FwBk -->
+       <p id="75" v="500"/>     <!-- RmsThr0Vel1FwBk -->
+       <p id="76" v="900"/>     <!-- RmsThr1Vel1FwBk -->
+       <p id="77" v="1200"/>    <!-- RmsThr2Vel1FwBk -->
+       <p id="78" v="1900"/>    <!-- RmsThr3Vel1FwBk -->
+       <p id="79" v="500"/>     <!-- RmsThr0Vel2FwBk -->
+       <p id="80" v="900"/>     <!-- RmsThr1Vel2FwBk -->
+       <p id="81" v="1200"/>    <!-- RmsThr2Vel2FwBk -->                                          
+       <p id="82" v="1900"/>    <!-- RmsThr3Vel2FwBk -->
+       <p id="83" v="500"/>     <!-- RmsThr0Vel3FwBk -->
+       <p id="84" v="900"/>     <!-- RmsThr1Vel3FwBk -->
+       <p id="85" v="1200"/>    <!-- RmsThr2Vel3FwBk -->
+       <p id="86" v="1900"/>    <!-- RmsThr3Vel3FwBk -->
+       <p id="87" v="500"/>     <!-- RmsThr0Vel4FwBk -->
+       <p id="88" v="900"/>     <!-- RmsThr1Vel4FwBk -->
+       <p id="89" v="1200"/>    <!-- RmsThr2Vel4FwBk -->
+       <p id="90" v="1900"/>    <!-- RmsThr3Vel4FwBk -->
+       <p id="91" v="500"/>     <!-- RmsThr0Vel5FwBk -->                                          
+       <p id="92" v="900"/>     <!-- RmsThr1Vel5FwBk -->
+       <p id="93" v="1200"/>    <!-- RmsThr2Vel5FwBk -->
+       <p id="94" v="1900"/>    <!-- RmsThr3Vel5FwBk -->
+       <p id="95" v="500"/>     <!-- RmsThr0Vel0BwFr -->
+       <p id="96" v="900"/>     <!-- RmsThr1Vel0BwFr -->
+       <p id="97" v="1200"/>    <!-- RmsThr2Vel0BwFr -->
+       <p id="98" v="1900"/>    <!-- RmsThr3Vel0BwFr -->
+       <p id="99" v="500"/>     <!-- RmsThr0Vel1BwFr -->
+       <p id="100" v="900"/>    <!-- RmsThr1Vel1BwFr -->
+       <p id="101" v="1200"/>   <!-- RmsThr2Vel1BwFr -->                                          
+       <p id="102" v="1900"/>   <!-- RmsThr3Vel1BwFr -->
+       <p id="103" v="500"/>    <!-- RmsThr0Vel2BwFr -->
+       <p id="104" v="900"/>    <!-- RmsThr1Vel2BwFr -->
+       <p id="105" v="1200"/>   <!-- RmsThr2Vel2BwFr -->
+       <p id="106" v="1900"/>   <!-- RmsThr3Vel2BwFr -->
+       <p id="107" v="500"/>    <!-- RmsThr0Vel3BwFr -->
+       <p id="108" v="900"/>    <!-- RmsThr1Vel3BwFr -->
+       <p id="109" v="1200"/>   <!-- RmsThr2Vel3BwFr -->
+       <p id="110" v="1900"/>   <!-- RmsThr3Vel3BwFr -->
+       <p id="111" v="500"/>    <!-- RmsThr0Vel4BwFr -->                                          
+       <p id="112" v="900"/>    <!-- RmsThr1Vel4BwFr -->
+       <p id="113" v="1200"/>   <!-- RmsThr2Vel4BwFr -->
+       <p id="114" v="1900"/>   <!-- RmsThr3Vel4BwFr -->
+       <p id="115" v="500"/>    <!-- RmsThr0Vel5BwFr -->
+       <p id="116" v="900"/>    <!-- RmsThr1Vel5BwFr -->
+       <p id="117" v="1200"/>   <!-- RmsThr2Vel5BwFr -->
+       <p id="118" v="1900"/>   <!-- RmsThr3Vel5BwFr -->
+       <p id="119" v="500"/>    <!-- RmsThr0Vel0BwBk -->
+       <p id="120" v="900"/>    <!-- RmsThr1Vel0BwBk -->
+       <p id="121" v="1200"/>   <!-- RmsThr2Vel0BwBk -->                                         
+       <p id="122" v="1900"/>   <!-- RmsThr3Vel0BwBk -->
+       <p id="123" v="500"/>    <!-- RmsThr0Vel1BwBk -->
+       <p id="124" v="900"/>    <!-- RmsThr1Vel1BwBk -->
+       <p id="125" v="1200"/>   <!-- RmsThr2Vel1BwBk -->
+       <p id="126" v="1900"/>   <!-- RmsThr3Vel1BwBk -->
+       <p id="127" v="500"/>    <!-- RmsThr0Vel2BwBk -->
+       <p id="128" v="900"/>    <!-- RmsThr1Vel2BwBk -->
+       <p id="129" v="1200"/>   <!-- RmsThr2Vel2BwBk -->
+       <p id="130" v="1900"/>   <!-- RmsThr3Vel2BwBk -->
+       <p id="131" v="500"/>    <!-- RmsThr0Vel3BwBk -->                                         
+       <p id="132" v="900"/>    <!-- RmsThr1Vel3BwBk -->
+       <p id="133" v="1200"/>   <!-- RmsThr2Vel3BwBk -->
+       <p id="134" v="1900"/>   <!-- RmsThr3Vel3BwBk -->
+       <p id="135" v="500"/>    <!-- RmsThr0Vel4BwBk -->
+       <p id="136" v="900"/>    <!-- RmsThr1Vel4BwBk -->
+       <p id="137" v="1200"/>   <!-- RmsThr2Vel4BwBk -->
+       <p id="138" v="1900"/>   <!-- RmsThr3Vel4BwBk -->
+       <p id="139" v="500"/>    <!-- RmsThr0Vel5BwBk -->
+       <p id="140" v="900"/>    <!-- RmsThr1Vel5BwBk -->
+       <p id="141" v="1200"/>   <!-- RmsThr2Vel5BwBk -->                                          
+       <p id="142" v="1900"/>   <!-- RmsThr3Vel5BwBk -->
+       <p id="143" v="1000"/>     <!-- RmsMobVel0FwFr -->
+       <p id="144" v="1000"/>     <!-- RmsMobVel1FwFr -->
+       <p id="145" v="1000"/>     <!-- RmsMobVel2FwFr -->
+       <p id="146" v="1000"/>     <!-- RmsMobVel3FwFr -->
+       <p id="147" v="1000"/>     <!-- RmsMobVel4FwFr -->
+       <p id="148" v="1000"/>     <!-- RmsMobVel5FwFr -->
+       <p id="149" v="1000"/>     <!-- RmsMobVel0FwBk -->
+       <p id="150" v="1000"/>     <!-- RmsMobVel1FwBk -->
+       <p id="151" v="1000"/>     <!-- RmsMobVel2FwBk -->                                         
+       <p id="152" v="1000"/>     <!-- RmsMobVel3FwBk -->
+       <p id="153" v="1000"/>     <!-- RmsMobVel4FwBk -->
+       <p id="154" v="1000"/>     <!-- RmsMobVel5FwBk -->
+       <p id="155" v="1000"/>     <!-- RmsMobVel0BwFr -->
+       <p id="156" v="1000"/>     <!-- RmsMobVel1BwFr -->
+       <p id="157" v="1000"/>     <!-- RmsMobVel2BwFr -->
+       <p id="158" v="1000"/>     <!-- RmsMobVel3BwFr -->
+       <p id="159" v="1000"/>     <!-- RmsMobVel4BwFr -->
+       <p id="160" v="1000"/>     <!-- RmsMobVel5BwFr -->
+       <p id="161" v="1000"/>     <!-- RmsMobVel0BwBk -->                                         
+       <p id="162" v="1000"/>     <!-- RmsMobVel1BwBk -->
+       <p id="163" v="1000"/>     <!-- RmsMobVel2BwBk -->
+       <p id="164" v="1000"/>     <!-- RmsMobVel3BwBk -->
+       <p id="165" v="1000"/>     <!-- RmsMobVel4BwBk -->
+       <p id="166" v="1000"/>     <!-- RmsMobVel5BwBk -->
+       <p id="167" v="1"/>      <!-- Chn1 -->
+       <p id="168" v="1"/>      <!-- Chn2 -->
+       <p id="169" v="0"/>      <!-- Chn3 -->
+       <p id="170" v="0"/>      <!-- Chn4 -->
+       <p id="171" v="96"/>    <!-- FFT -->
+       <p id="172" v="96"/>    <!-- MOB -->
+       <p id="173" v="96"/>    <!-- RAW -->
+       <!-- x-EnAlg-EnOut-x-x-HD-SD-ROM -->
+</p-list>

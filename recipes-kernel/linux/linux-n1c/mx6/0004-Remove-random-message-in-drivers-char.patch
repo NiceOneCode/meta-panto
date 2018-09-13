@@ -1,0 +1,42 @@
+From 73b216557974640c9aa1f796890086e790219601 Mon Sep 17 00:00:00 2001
+From: WANGA <andrea_gai@virgilio.it>
+Date: Tue, 10 Jul 2018 18:43:56 +0200
+Subject: [PATCH] Remove random message in /drivers/char
+
+
+diff --git a/drivers/char/random.c b/drivers/char/random.c
+index 9cd6968..404bcb8 100644
+--- a/drivers/char/random.c
++++ b/drivers/char/random.c
+@@ -645,8 +645,7 @@ retry:
+ 	}
+ 
+ 	if (unlikely(entropy_count < 0)) {
+-		pr_warn("random: negative entropy/overflow: pool %s count %d\n",
+-			r->name, entropy_count);
++		// pr_warn("random: negative entropy/overflow: pool %s count %d\n",r->name, entropy_count);
+ 		WARN_ON(1);
+ 		entropy_count = 0;
+ 	} else if (entropy_count > pool_size)
+@@ -661,7 +660,7 @@ retry:
+ 		if (r == &nonblocking_pool) {
+ 			prandom_reseed_late();
+ 			wake_up_interruptible(&urandom_init_wait);
+-			pr_notice("random: %s pool is initialized\n", r->name);
++		// 	pr_notice("random: %s pool is initialized\n", r->name);
+ 		}
+ 	}
+ 
+@@ -1037,8 +1036,7 @@ retry:
+ 		ibytes = 0;
+ 
+ 	if (unlikely(entropy_count < 0)) {
+-		pr_warn("random: negative entropy count: pool %s count %d\n",
+-			r->name, entropy_count);
++		// pr_warn("random: negative entropy count: pool %s count %d\n",r->name, entropy_count);
+ 		WARN_ON(1);
+ 		entropy_count = 0;
+ 	}
+-- 
+2.7.4
+

@@ -1,0 +1,48 @@
+ 
+DESCRIPTION = "FFTW Library on yocto"
+LICENSE = "GPLv2"
+LIC_FILES_CHKSUM ="file://fftw-3.3.5.tar.gz;md5=6cc08a3b9c7ee06fdd5b9eb02e06f569"
+ 
+PR = "r0"
+ 
+SRC_URI = "file://fftw-3.3.5.tar.gz"
+S = "${WORKDIR}/fftw-3.3.5/"
+ 
+PACKAGES = "${PN} ${PN}-dev ${PN}-dbg ${PN}-staticdev"
+
+EXTRA_OECONF += " \
+    --enable-neon \
+    --enable-single \
+"
+
+RDEPENDS_${PN}-staticdev = ""
+RDEPENDS_${PN}-dev = ""
+RDEPENDS_${PN}-dbg = ""
+
+do_configure(){
+
+	${CFLAGS}+=-march=armv8-a
+        ${CFLAGS}+=-mfpu=neon 
+        ${CFLAGS}+=-mfloat-abi=softfp
+
+}
+ 
+do_compile(){
+ 
+ #
+ #        ${CC} -c calc_mean.c -o calc_mean.o
+ #        ${AR} rcs libmean.a calc_mean.o
+ #
+
+}
+ 
+ 
+ 
+do_install(){
+ 
+ #
+ #      install -d ${D}${libdir}
+ #      install -m 0644 libmean.a ${D}${libdir}
+ 
+}
+ 

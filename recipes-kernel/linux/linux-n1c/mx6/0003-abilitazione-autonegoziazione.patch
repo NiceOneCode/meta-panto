@@ -1,0 +1,178 @@
+From 8ac3301c3f2979ce9a380ea1fb0bae3bb87869b3 Mon Sep 17 00:00:00 2001
+From: Alessandro Fontani <alessandrofontani@gmail.com>
+Date: Wed, 30 May 2018 16:32:02 +0200
+Subject: [PATCH] abilitazione autonegoziazione
+
+
+diff --git a/drivers/net/phy/phy_device.c b/drivers/net/phy/phy_device.c
+index 857ce0d..82c8606 100644
+--- a/drivers/net/phy/phy_device.c
++++ b/drivers/net/phy/phy_device.c
+@@ -162,14 +162,21 @@ struct phy_device *phy_device_create(struct mii_bus *bus, int addr, int phy_id,
+ 
+ 	dev->dev.release = phy_device_release;
+ 
+-	dev->speed = 0;
+-	dev->duplex = -1;
++/* DND Autoneg OFF */
++//	dev->speed = 0;
++	dev->speed = SPEED_100;
++//	dev->duplex = -1;
++	dev->duplex = DUPLEX_FULL;
++
+ 	dev->pause = 0;
+ 	dev->asym_pause = 0;
+ 	dev->link = 1;
+ 	dev->interface = PHY_INTERFACE_MODE_GMII;
+ 
+-	dev->autoneg = AUTONEG_ENABLE;
++//	dev->autoneg = AUTONEG_ENABLE;
++	dev->autoneg = AUTONEG_DISABLE;
++
++        printk("\n Autoneg OFF Init phy device \n\n");
+ 
+ 	dev->is_c45 = is_c45;
+ 	dev->addr = addr;
+@@ -832,6 +839,10 @@ int genphy_setup_forced(struct phy_device *phydev)
+ 	if (DUPLEX_FULL == phydev->duplex)
+ 		ctl |= BMCR_FULLDPLX;
+ 
++	//printk("\nAutoneg OFF genphy setup forced = %08x", ctl);
++        ctl = 0x2100;
++	//printk("\nAutoneg OFF genphy setup forced = %08x", ctl);
++
+ 	return phy_write(phydev, MII_BMCR, ctl);
+ }
+ EXPORT_SYMBOL(genphy_setup_forced);
+@@ -852,6 +863,10 @@ int genphy_restart_aneg(struct phy_device *phydev)
+ 	/* Don't isolate the PHY if we're negotiating */
+ 	ctl &= ~BMCR_ISOLATE;
+ 
++	//printk("\nAutoneg OFF genphy restart aneg = %08x", ctl);
++        ctl = 0x2100;
++	//printk("\nAutoneg OFF genphy restart aneg = %08x", ctl);
++
+ 	return phy_write(phydev, MII_BMCR, ctl);
+ }
+ EXPORT_SYMBOL(genphy_restart_aneg);
+@@ -868,6 +883,8 @@ int genphy_config_aneg(struct phy_device *phydev)
+ {
+ 	int result;
+ 
++        //printk("\n Autoneg OFF genphy Config Aneg\n\n");
++
+ 	if (AUTONEG_ENABLE != phydev->autoneg)
+ 		return genphy_setup_forced(phydev);
+ 
+@@ -1002,6 +1019,8 @@ int genphy_read_status(struct phy_device *phydev)
+ 
+ 		common_adv = lpa & adv;
+ 
++        //printk("\n Autoneg OFF genphy read status Autoneg Enable\n\n");
++		
+ 		phydev->speed = SPEED_10;
+ 		phydev->duplex = DUPLEX_HALF;
+ 		phydev->pause = 0;
+@@ -1031,6 +1050,8 @@ int genphy_read_status(struct phy_device *phydev)
+ 		if (bmcr < 0)
+ 			return bmcr;
+ 
++        //printk("\n Autoneg OFF genphy read status Autoneg Disable %02x\n\n", bmcr);
++
+ 		if (bmcr & BMCR_FULLDPLX)
+ 			phydev->duplex = DUPLEX_FULL;
+ 		else
+@@ -1091,6 +1112,8 @@ int genphy_soft_reset(struct phy_device *phydev)
+ {
+ 	int ret;
+ 
++    //printk("\nAutoneg OFF genphy Soft Reset\n\n");
++
+ 	ret = phy_write(phydev, MII_BMCR, BMCR_RESET);
+ 	if (ret < 0)
+ 		return ret;
+diff --git a/drivers/net/phy/smsc.c b/drivers/net/phy/smsc.c
+index c0f6479..aff752d 100644
+--- a/drivers/net/phy/smsc.c
++++ b/drivers/net/phy/smsc.c
+@@ -24,6 +24,8 @@
+ #include <linux/netdevice.h>
+ #include <linux/smscphy.h>
+ 
++//#define NO_AUTONEG
++
+ static int smsc_phy_config_intr(struct phy_device *phydev)
+ {
+ 	int rc = phy_write (phydev, MII_LAN83C185_IM,
+@@ -45,14 +47,17 @@ static int smsc_phy_config_init(struct phy_device *phydev)
+ {
+ 	int rc = phy_read(phydev, MII_LAN83C185_CTRL_STATUS);
+ 
++        //printk("\nAutoneg OFF smsc_phy_config_init\n\n");
+ 	if (rc < 0)
+ 		return rc;
+ 
++#ifdef NO_AUTONEG
+ 	/* Enable energy detect mode for this SMSC Transceivers */
+ 	rc = phy_write(phydev, MII_LAN83C185_CTRL_STATUS,
+ 		       rc | MII_LAN83C185_EDPWRDOWN);
+ 	if (rc < 0)
+ 		return rc;
++#endif
+ 
+ 	return smsc_phy_ack_interrupt(phydev);
+ }
+@@ -63,6 +68,10 @@ static int smsc_phy_reset(struct phy_device *phydev)
+ 	if (rc < 0)
+ 		return rc;
+ 
++
++        //printk("\nAutoneg OFF smsc Soft Reset\n\n");
++
++#ifdef NO_AUTONEG
+ 	/* If the SMSC PHY is in power down mode, then set it
+ 	 * in all capable mode before using it.
+ 	 */
+@@ -82,6 +91,8 @@ static int smsc_phy_reset(struct phy_device *phydev)
+ 			rc = phy_read(phydev, MII_BMCR);
+ 		} while (rc & BMCR_RESET);
+ 	}
++#endif
++
+ 	return 0;
+ }
+ 
+@@ -108,6 +119,10 @@ static int lan87xx_read_status(struct phy_device *phydev)
+ 	if (!phydev->link) {
+ 		/* Disable EDPD to wake up PHY */
+ 		int rc = phy_read(phydev, MII_LAN83C185_CTRL_STATUS);
++
++		//printk("\nAutoneg OFF smsc Read Status = %02x\n\n",rc);
++		
++#ifdef NO_AUTONEG
+ 		if (rc < 0)
+ 			return rc;
+ 
+@@ -128,6 +143,7 @@ static int lan87xx_read_status(struct phy_device *phydev)
+ 			       rc | MII_LAN83C185_EDPWRDOWN);
+ 		if (rc < 0)
+ 			return rc;
++#endif
+ 	}
+ 
+ 	return err;
+@@ -230,9 +246,9 @@ static struct phy_driver smsc_phy_driver[] = {
+ 	.phy_id_mask	= 0xfffffff0,
+ 	.name		= "SMSC LAN8710/LAN8720",
+ 
+-	.features	= (PHY_BASIC_FEATURES | SUPPORTED_Pause
++	.features	= (SUPPORTED_TP | SUPPORTED_MII | SUPPORTED_Pause
+ 				| SUPPORTED_Asym_Pause),
+-	.flags		= PHY_HAS_INTERRUPT | PHY_HAS_MAGICANEG,
++	.flags		= PHY_HAS_INTERRUPT,
+ 
+ 	/* basic functions */
+ 	.config_aneg	= genphy_config_aneg,
+-- 
+2.7.4
+
